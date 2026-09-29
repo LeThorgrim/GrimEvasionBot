@@ -4,11 +4,11 @@ A Discord bot that proxies messages containing trigger words: it deletes the ori
 
 ## TODO List
 
-- Replies in some sort of way
 - List the banned words of the guild (page system ?)
 - Fizzy word detection (maybe true or false per guild)
 - Set per guild the required permission to manage the bot
 - Implement an auto-deployed DB
+- Set up a default list that can be added w a command (and infos w an other)
 
 ## Features
 
@@ -48,3 +48,4 @@ Run `/grimproxywordadd word:<your word>` in any server the bot is in. Any future
 
 - `words.json` is created automatically and stores each guild's word list. It's gitignored since it may contain server-specific or sensitive words.
 - `words.json` as a flat file isn't safe for concurrent writes across multiple bot instances (use a real database if you scale beyond a single process).
+- If the bot replies to a message that gets deleted afterwards, it is not updated.

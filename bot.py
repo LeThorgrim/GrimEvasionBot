@@ -13,7 +13,8 @@ if not TOKEN:
     raise SystemExit("DISCORD_TOKEN not found: check your .env file")
 
 WORDS_FILE = "words.json"
-DELETE_DELAY = 0.1  # seconds to wait before deleting the original message (local display for users is bugged when to low)
+DELETE_DELAY = 0.1  # seconds to wait before deleting the original message (local display for users is bugged when too low)
+PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
 
 
 def load_words() -> dict:
@@ -76,6 +77,31 @@ async def get_webhook(channel: discord.abc.GuildChannel) -> discord.Webhook:
     return hook
 
 
+async def build_reply_prefix(msg: discord.Message) -> str:
+    """Return a small subtext preview line if msg is a reply, else an empty string."""
+    if not msg.reference or not msg.reference.message_id:
+        return ""
+
+    try:
+        replied = msg.reference.resolved
+        if replied is None:
+            replied = await msg.channel.fetch_message(msg.reference.message_id)
+    except (discord.NotFound, discord.HTTPException):
+        return "-# ↱ *Replying to a deleted message*\n\n"
+
+    if isinstance(replied, discord.DeletedReferencedMessage):
+        return "-# ↱ *Replying to a deleted message*\n\n"
+
+    preview = replied.content.replace("\n", " ").strip()
+    if len(preview) > PREVIEW_LENGTH:
+        preview = preview[:PREVIEW_LENGTH - 3] + "..."
+    if not preview:
+        preview = "*[attachment/embed]*"
+
+    # "-# " renders as small subtext in Discord; <@id> renders as a clickable mention
+    return f"-# ↱ Replying to <@{replied.author.id}>: {preview} • [Jump to message]({replied.jump_url})\n-# ───────────────────\n"
+
+
 @client.event
 async def on_ready():
     print(f"Logged in as {client.user}")
@@ -135,11 +161,13 @@ async def on_message(msg: discord.Message):
         print(f"Failed to get/create webhook in #{channel}: {e}")
         return
 
+    reply_prefix = await build_reply_prefix(msg)
+    content = reply_prefix + msg.content
     files = [await a.to_file() for a in msg.attachments]
 
     try:
         await hook.send(
-            content=msg.content,
+            content=content,
             username=msg.author.display_name,
             avatar_url=msg.author.display_avatar.url,
             files=files,
@@ -153,7 +181,7 @@ async def on_message(msg: discord.Message):
         try:
             hook = await get_webhook(channel)
             await hook.send(
-                content=msg.content,
+                content=content,
                 username=msg.author.display_name,
                 avatar_url=msg.author.display_avatar.url,
                 files=files,
