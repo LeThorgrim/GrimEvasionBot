@@ -5,7 +5,6 @@ A Discord bot that proxies messages containing trigger words: it deletes the ori
 ## TODO List
 
 - Fizzy word detection (maybe true or false per guild)
-- Set per guild the required permission to manage the bot
 - Implement an auto-deployed DB
 - Set up a default list that can be added w a command (and infos w an other)
 
