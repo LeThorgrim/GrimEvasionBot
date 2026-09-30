@@ -4,7 +4,6 @@ A Discord bot that proxies messages containing trigger words: it deletes the ori
 
 ## TODO List
 
-- List the banned words of the guild (page system ?)
 - Fizzy word detection (maybe true or false per guild)
 - Set per guild the required permission to manage the bot
 - Implement an auto-deployed DB
@@ -14,8 +13,11 @@ A Discord bot that proxies messages containing trigger words: it deletes the ori
 
 - Per-guild trigger word list, stored in `words.json`
 - `/grimproxywordadd` slash command to add words (requires **Manage Server** permission)
+- `/grimproxylist` slash command to list a guild's trigger words, paginated with buttons
+- `/grimproxyinfo` slash command describing the bot and its commands
 - Reposts via webhook, preserving attachments
 - Works in threads
+- If the proxied message is a reply, shows a small clickable preview linking to the original
 
 ## Setup
 
@@ -42,10 +44,12 @@ python bot.py
 
 ## Usage
 
-Run `/grimproxywordadd word:<your word>` in any server the bot is in. Any future message containing that word (case-insensitive, whole word match) gets deleted and reposted under the author's identity.
+- `/grimproxywordadd word:<your word>` — add a trigger word to this server's list (requires **Manage Server**). Any future message containing that word (case-insensitive, whole word match) gets deleted and reposted under the author's identity.
+- `/grimproxylist page:<number>(optional)` — browse this server's trigger words, 20 per page, with Previous/Next buttons.
+- `/grimproxyinfo` — shows what the bot does and lists all commands.
 
 ## Notes
 
 - `words.json` is created automatically and stores each guild's word list. It's gitignored since it may contain server-specific or sensitive words.
 - `words.json` as a flat file isn't safe for concurrent writes across multiple bot instances (use a real database if you scale beyond a single process).
-- If the bot replies to a message that gets deleted afterwards, it is not updated.
+- If the bot replies to a message that gets deleted afterwards, the bot answer is not updated.
