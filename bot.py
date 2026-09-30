@@ -13,6 +13,7 @@ if not TOKEN:
     raise SystemExit("DISCORD_TOKEN not found: check your .env file")
 
 WORDS_FILE = "words.json"
+WORD_LISTS_DIR = "wordLists"  # folder containing default word list .json files
 DELETE_DELAY = 0.1  # seconds to wait before deleting the original message (local display for users is bugged when too low)
 PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
 WORDS_PER_PAGE = 20  # max words shown per page in /grimevasionlist
@@ -46,6 +47,31 @@ def refresh_pattern(guild_id: str) -> None:
 
 for gid in guild_words:
     refresh_pattern(gid)
+
+
+def list_default_word_lists() -> list[str]:
+    """Return the names (without .json) of default word list files available."""
+    if not os.path.isdir(WORD_LISTS_DIR):
+        return []
+    return sorted(
+        f[:-5] for f in os.listdir(WORD_LISTS_DIR)
+        if f.endswith(".json") and os.path.isfile(os.path.join(WORD_LISTS_DIR, f))
+    )
+
+
+def load_default_word_list(name: str) -> list[str] | None:
+    """Load a default word list by name (without .json). Returns None if not found/invalid."""
+    path = os.path.join(WORD_LISTS_DIR, f"{name}.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, list) or not all(isinstance(w, str) for w in data):
+        return None
+    return [w.strip().lower() for w in data if w.strip()]
 
 
 intents = discord.Intents.default()
@@ -137,6 +163,16 @@ async def grim_evasion_info(interaction: discord.Interaction):
     embed.add_field(
         name="/grimevasionlist `page`",
         value="Lists the trigger words configured for this server, with pagination.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/grimevasiondefaultlist",
+        value="Lists the default word lists available to import.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/grimevasiondefaultadd `name`",
+        value="Imports a default word list into this server's trigger list. Requires **Manage Server**.",
         inline=False,
     )
     embed.set_footer(text="Messages replying to another message keep a small preview and link.")
@@ -257,6 +293,82 @@ async def grim_proxy_word_add(interaction: discord.Interaction, word: str):
 
 @grim_proxy_word_add.error
 async def grim_proxy_word_add_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("You need the Manage Server permission to use this.", ephemeral=True)
+    else:
+        print(f"Command error: {error}")
+        await interaction.response.send_message("Something went wrong.", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# /grimevasiondefaultlist
+# ---------------------------------------------------------------------------
+
+@client.tree.command(name="grimevasiondefaultlist", description="List the default word lists available to import")
+async def grim_evasion_default_list(interaction: discord.Interaction):
+    names = list_default_word_lists()
+
+    if not names:
+        await interaction.response.send_message(
+            f"No default word lists found in the `{WORD_LISTS_DIR}` folder.", ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title="Available default word lists",
+        description="\n".join(f"• `{name}`" for name in names),
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text="Use /grimevasiondefaultadd name:<list name> to import one.")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# /grimevasiondefaultadd
+# ---------------------------------------------------------------------------
+
+async def default_list_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    names = list_default_word_lists()
+    filtered = [n for n in names if current.lower() in n.lower()]
+    return [app_commands.Choice(name=n, value=n) for n in filtered[:25]]
+
+
+@client.tree.command(name="grimevasiondefaultadd", description="Import a default word list into this server")
+@app_commands.describe(name="Name of the default list to import (without .json)")
+@app_commands.autocomplete(name=default_list_autocomplete)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def grim_evasion_default_add(interaction: discord.Interaction, name: str):
+    words_to_add = load_default_word_list(name)
+
+    if words_to_add is None:
+        await interaction.response.send_message(
+            f"No valid default list named `{name}` found in `{WORD_LISTS_DIR}/`.", ephemeral=True
+        )
+        return
+
+    guild_id = str(interaction.guild_id)
+    existing = guild_words.setdefault(guild_id, [])
+    existing_set = set(existing)
+
+    new_words = [w for w in words_to_add if w not in existing_set]
+    existing.extend(new_words)
+
+    save_words(guild_words)
+    refresh_pattern(guild_id)
+
+    skipped = len(words_to_add) - len(new_words)
+    message = f"Imported `{name}`: added {len(new_words)} word(s)."
+    if skipped:
+        message += f" Skipped {skipped} already present."
+
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+@grim_evasion_default_add.error
+async def grim_evasion_default_add_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("You need the Manage Server permission to use this.", ephemeral=True)
     else:
