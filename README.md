@@ -37,8 +37,8 @@ DISCORD_TOKEN=your_token_here
 
 ```json
 [
-  "badwordtest1",
-  "badwordtest2"
+  "word1",
+  "word2"
 ]
 ```
 
@@ -63,4 +63,3 @@ python bot.py
 - `words.json` is created automatically and stores each guild's word list. It's gitignored since it may contain server-specific or sensitive words.
 - `words.json` as a flat file isn't safe for concurrent writes across multiple bot instances (use a real database if you scale beyond a single process).
 - If the bot replies to a message that gets deleted afterwards, the bot answer is not updated.
-- Restructuring commands into groups/subgroups triggers a full command resync, which can take up to an hour to propagate globally. Sync to a single guild during development to see changes instantly.
