@@ -138,12 +138,13 @@ async def on_ready():
 # /grimevasion command group
 # ---------------------------------------------------------------------------
 # Top-level subcommands appear as "/grimevasion <subcommand>", e.g. "/grimevasion list"
-# The "word" subgroup nests one level deeper: "/grimevasion word add", "/grimevasion word remove"
+# "word" and "lists" are subgroups: "/grimevasion word add", "/grimevasion lists show"
 
 grimevasion_group = app_commands.Group(name="grimevasion", description="GrimEvasion proxy bot commands")
 client.tree.add_command(grimevasion_group)
 
 word_group = app_commands.Group(name="word", description="Manage this server's trigger words", parent=grimevasion_group)
+lists_group = app_commands.Group(name="lists", description="Browse and import default word lists", parent=grimevasion_group)
 
 
 # ---------------------------------------------------------------------------
@@ -183,12 +184,17 @@ async def grim_evasion_info(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
-        name="/grimevasion defaultlist",
+        name="/grimevasion lists list",
         value="Lists the default word lists available to import.",
         inline=False,
     )
     embed.add_field(
-        name="/grimevasion defaultadd `name`",
+        name="/grimevasion lists show `name`",
+        value="Previews the content of a specific default word list.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/grimevasion lists add `name`",
         value="Imports a default word list into this server's trigger list. Requires **Manage Server**.",
         inline=False,
     )
@@ -358,12 +364,20 @@ async def grim_evasion_word_remove_error(interaction: discord.Interaction, error
         await interaction.response.send_message("Something went wrong.", ephemeral=True)
 
 
+async def default_list_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    names = list_default_word_lists()
+    filtered = [n for n in names if current.lower() in n.lower()]
+    return [app_commands.Choice(name=n, value=n) for n in filtered[:25]]
+
+
 # ---------------------------------------------------------------------------
-# /grimevasion defaultlist
+# /grimevasion lists list
 # ---------------------------------------------------------------------------
 
-@grimevasion_group.command(name="defaultlist", description="List the default word lists available to import")
-async def grim_evasion_default_list(interaction: discord.Interaction):
+@lists_group.command(name="list", description="List the default word lists available to import")
+async def grim_evasion_lists_list(interaction: discord.Interaction):
     names = list_default_word_lists()
 
     if not names:
@@ -377,28 +391,110 @@ async def grim_evasion_default_list(interaction: discord.Interaction):
         description="\n".join(f"• `{name}`" for name in names),
         color=discord.Color.blurple(),
     )
-    embed.set_footer(text="Use /grimevasion defaultadd name:<list name> to import one.")
+    embed.set_footer(text="Use /grimevasion lists show name:<list name> to preview its content, or lists add to import it.")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
-# /grimevasion defaultadd
+# /grimevasion lists show
 # ---------------------------------------------------------------------------
 
-async def default_list_autocomplete(
-    interaction: discord.Interaction, current: str
-) -> list[app_commands.Choice[str]]:
-    names = list_default_word_lists()
-    filtered = [n for n in names if current.lower() in n.lower()]
-    return [app_commands.Choice(name=n, value=n) for n in filtered[:25]]
+def build_default_list_embed(list_name: str, words: list[str], page: int, total_pages: int) -> discord.Embed:
+    start = page * WORDS_PER_PAGE
+    end = start + WORDS_PER_PAGE
+    page_words = words[start:end]
+
+    description = ", ".join(f"`{w}`" for w in page_words) if page_words else "*This list is empty.*"
+
+    embed = discord.Embed(
+        title=f"Default list — {list_name}",
+        description=description,
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(
+        text=f"Page {page + 1}/{total_pages} • {len(words)} word(s) • Use /grimevasion lists add name:{list_name} to import it."
+    )
+    return embed
 
 
-@grimevasion_group.command(name="defaultadd", description="Import a default word list into this server")
+class DefaultListView(discord.ui.View):
+    def __init__(self, list_name: str, words: list[str], page: int, requester_id: int):
+        super().__init__(timeout=120)
+        self.list_name = list_name
+        self.words = words
+        self.page = page
+        self.requester_id = requester_id
+        self._update_button_state()
+
+    def _total_pages(self) -> int:
+        return max(1, (len(self.words) + WORDS_PER_PAGE - 1) // WORDS_PER_PAGE)
+
+    def _update_button_state(self):
+        total_pages = self._total_pages()
+        self.previous_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= total_pages - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can use these buttons.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _refresh(self, interaction: discord.Interaction):
+        total_pages = self._total_pages()
+        self.page = max(0, min(self.page, total_pages - 1))
+        self._update_button_state()
+        embed = build_default_list_embed(self.list_name, self.words, self.page, total_pages)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        await self._refresh(interaction)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+@lists_group.command(name="show", description="Show the content of a specific default word list")
+@app_commands.describe(name="Name of the default list to preview (without .json)", page="Page number to jump to (starts at 1)")
+@app_commands.autocomplete(name=default_list_autocomplete)
+async def grim_evasion_lists_show(interaction: discord.Interaction, name: str, page: int = 1):
+    words = load_default_word_list(name)
+
+    if words is None:
+        await interaction.response.send_message(
+            f"No valid default list named `{name}` found in `{WORD_LISTS_DIR}/`.", ephemeral=True
+        )
+        return
+
+    total_pages = max(1, (len(words) + WORDS_PER_PAGE - 1) // WORDS_PER_PAGE)
+    page_index = max(0, min(page - 1, total_pages - 1))
+
+    embed = build_default_list_embed(name, words, page_index, total_pages)
+    view = DefaultListView(name, words, page_index, interaction.user.id)
+
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# /grimevasion lists add
+# ---------------------------------------------------------------------------
+
+@lists_group.command(name="add", description="Import a default word list into this server")
 @app_commands.describe(name="Name of the default list to import (without .json)")
 @app_commands.autocomplete(name=default_list_autocomplete)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def grim_evasion_default_add(interaction: discord.Interaction, name: str):
+async def grim_evasion_lists_add(interaction: discord.Interaction, name: str):
     words_to_add = load_default_word_list(name)
 
     if words_to_add is None:
@@ -425,8 +521,8 @@ async def grim_evasion_default_add(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(message, ephemeral=True)
 
 
-@grim_evasion_default_add.error
-async def grim_evasion_default_add_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+@grim_evasion_lists_add.error
+async def grim_evasion_lists_add_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("You need the Manage Server permission to use this.", ephemeral=True)
     else:
