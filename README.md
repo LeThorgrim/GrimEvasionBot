@@ -5,11 +5,10 @@ A Discord bot that proxies messages containing trigger words: it deletes the ori
 ## TODO List
 
 - Fizzy word detection (maybe true or false per guild)
-- Implement an auto-deployed DB
 
 ## Features
 
-- Per-guild trigger word list, stored in `words.json`
+- Per-guild trigger word list, stored in a SQLite database (`grimevasion.db`) via `aiosqlite`
 - All commands grouped under `/grimevasion`, with nested subcommands (`/grimevasion word add`, `/grimevasion lists show`, etc.)
 - Default word lists, stored as `.json` files in `wordLists/`, that can be previewed and imported into any guild
 - Reposts via webhook, preserving attachments
@@ -27,6 +26,11 @@ A Discord bot that proxies messages containing trigger words: it deletes the ori
    - Send Messages
    - Attach Files
 4. Clone this repo and install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
 5. Create a `.env` file:
 
 ```dotenv
@@ -60,6 +64,6 @@ python bot.py
 
 ## Notes
 
-- `words.json` is created automatically and stores each guild's word list. It's gitignored since it may contain server-specific or sensitive words.
-- `words.json` as a flat file isn't safe for concurrent writes across multiple bot instances (use a real database if you scale beyond a single process).
+- Trigger words are stored in `grimevasion.db` (SQLite), created automatically on first run via `db.py`. It's gitignored since it may contain server-specific or sensitive words.
+- SQLite handles concurrent writes safely for a single bot process. If you ever shard across multiple processes/machines sharing the same data, move to a networked database instead.
 - If the bot replies to a message that gets deleted afterwards, the bot answer is not updated.

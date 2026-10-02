@@ -6,32 +6,19 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
+import db
+
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise SystemExit("DISCORD_TOKEN not found: check your .env file")
 
-WORDS_FILE = "words.json"
 WORD_LISTS_DIR = "wordLists"  # folder containing default word list .json files
 DELETE_DELAY = 0.1  # seconds to wait before deleting the original message (local display for users is bugged when too low)
 PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
 WORDS_PER_PAGE = 20  # max words shown per page in /grimevasion list
 
-
-def load_words() -> dict:
-    if not os.path.exists(WORDS_FILE):
-        return {}
-    with open(WORDS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_words(data: dict) -> None:
-    with open(WORDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-guild_words = load_words()          # {guild_id (str): [word, ...]}
 guild_patterns: dict[str, re.Pattern] = {}  # cache: guild_id -> compiled regex
 
 
@@ -41,12 +28,9 @@ def build_pattern(words: list[str]) -> re.Pattern | None:
     return re.compile(r"\b(" + "|".join(map(re.escape, words)) + r")\b", re.IGNORECASE)
 
 
-def refresh_pattern(guild_id: str) -> None:
-    guild_patterns[guild_id] = build_pattern(guild_words.get(guild_id, []))
-
-
-for gid in guild_words:
-    refresh_pattern(gid)
+async def refresh_pattern(guild_id: str) -> None:
+    words = await db.get_words(guild_id)
+    guild_patterns[guild_id] = build_pattern(words)
 
 
 def list_default_word_lists() -> list[str]:
@@ -84,6 +68,7 @@ class ProxyClient(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        await db.init_db()
         await self.tree.sync()
 
 
@@ -132,6 +117,8 @@ async def build_reply_prefix(msg: discord.Message) -> str:
 @client.event
 async def on_ready():
     print(f"Logged in as {client.user}")
+    for guild_id in await db.get_all_guild_ids():
+        await refresh_pattern(guild_id)
 
 
 # ---------------------------------------------------------------------------
@@ -224,22 +211,14 @@ def build_list_embed(guild_name: str, words: list[str], page: int, total_pages: 
 
 
 class WordListView(discord.ui.View):
-    def __init__(self, guild_id: str, guild_name: str, page: int, requester_id: int):
+    def __init__(self, guild_id: str, guild_name: str, page: int, total_pages: int, requester_id: int):
         super().__init__(timeout=120)
         self.guild_id = guild_id
         self.guild_name = guild_name
         self.page = page
         self.requester_id = requester_id
-        self._update_button_state()
-
-    def _total_pages(self) -> int:
-        words = guild_words.get(self.guild_id, [])
-        return max(1, (len(words) + WORDS_PER_PAGE - 1) // WORDS_PER_PAGE)
-
-    def _update_button_state(self):
-        total_pages = self._total_pages()
-        self.previous_button.disabled = self.page <= 0
-        self.next_button.disabled = self.page >= total_pages - 1
+        self.previous_button.disabled = page <= 0
+        self.next_button.disabled = page >= total_pages - 1
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.requester_id:
@@ -250,10 +229,11 @@ class WordListView(discord.ui.View):
         return True
 
     async def _refresh(self, interaction: discord.Interaction):
-        words = guild_words.get(self.guild_id, [])
-        total_pages = self._total_pages()
+        words = await db.get_words(self.guild_id)
+        total_pages = max(1, (len(words) + WORDS_PER_PAGE - 1) // WORDS_PER_PAGE)
         self.page = max(0, min(self.page, total_pages - 1))
-        self._update_button_state()
+        self.previous_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= total_pages - 1
         embed = build_list_embed(self.guild_name, words, self.page, total_pages)
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -276,12 +256,12 @@ class WordListView(discord.ui.View):
 @app_commands.describe(page="Page number to jump to (starts at 1)")
 async def grim_evasion_list(interaction: discord.Interaction, page: int = 1):
     guild_id = str(interaction.guild_id)
-    words = guild_words.get(guild_id, [])
+    words = await db.get_words(guild_id)
     total_pages = max(1, (len(words) + WORDS_PER_PAGE - 1) // WORDS_PER_PAGE)
     page_index = max(0, min(page - 1, total_pages - 1))
 
     embed = build_list_embed(interaction.guild.name, words, page_index, total_pages)
-    view = WordListView(guild_id, interaction.guild.name, page_index, interaction.user.id)
+    view = WordListView(guild_id, interaction.guild.name, page_index, total_pages, interaction.user.id)
 
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
@@ -301,14 +281,12 @@ async def grim_evasion_word_add(interaction: discord.Interaction, word: str):
         await interaction.response.send_message("Word cannot be empty.", ephemeral=True)
         return
 
-    words = guild_words.setdefault(guild_id, [])
-    if word in words:
+    added = await db.add_word(guild_id, word)
+    if not added:
         await interaction.response.send_message(f"`{word}` is already in the list.", ephemeral=True)
         return
 
-    words.append(word)
-    save_words(guild_words)
-    refresh_pattern(guild_id)
+    await refresh_pattern(guild_id)
 
     await interaction.response.send_message(f"Added `{word}` to the proxy trigger list.", ephemeral=True)
 
@@ -330,7 +308,7 @@ async def guild_word_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     guild_id = str(interaction.guild_id)
-    words = guild_words.get(guild_id, [])
+    words = await db.get_words(guild_id)
     filtered = [w for w in words if current.lower() in w.lower()]
     return [app_commands.Choice(name=w, value=w) for w in filtered[:25]]
 
@@ -343,14 +321,12 @@ async def grim_evasion_word_remove(interaction: discord.Interaction, word: str):
     guild_id = str(interaction.guild_id)
     word = word.strip().lower()
 
-    words = guild_words.get(guild_id, [])
-    if word not in words:
+    removed = await db.remove_word(guild_id, word)
+    if not removed:
         await interaction.response.send_message(f"`{word}` is not in the list.", ephemeral=True)
         return
 
-    words.remove(word)
-    save_words(guild_words)
-    refresh_pattern(guild_id)
+    await refresh_pattern(guild_id)
 
     await interaction.response.send_message(f"Removed `{word}` from the proxy trigger list.", ephemeral=True)
 
@@ -504,17 +480,10 @@ async def grim_evasion_lists_add(interaction: discord.Interaction, name: str):
         return
 
     guild_id = str(interaction.guild_id)
-    existing = guild_words.setdefault(guild_id, [])
-    existing_set = set(existing)
+    added, skipped = await db.add_words(guild_id, words_to_add)
+    await refresh_pattern(guild_id)
 
-    new_words = [w for w in words_to_add if w not in existing_set]
-    existing.extend(new_words)
-
-    save_words(guild_words)
-    refresh_pattern(guild_id)
-
-    skipped = len(words_to_add) - len(new_words)
-    message = f"Imported `{name}`: added {len(new_words)} word(s)."
+    message = f"Imported `{name}`: added {added} word(s)."
     if skipped:
         message += f" Skipped {skipped} already present."
 
