@@ -7,6 +7,15 @@ DB_FILE = "grimevasion.db"
 _connection: aiosqlite.Connection | None = None
 
 
+DEFAULT_SETTINGS = {"doLinksTrigger": False, "doMediasTrigger": False}
+
+# Maps the public parameter name (used in commands) to its actual column name.
+_SETTING_COLUMNS = {
+    "doLinksTrigger": "do_links_trigger",
+    "doMediasTrigger": "do_medias_trigger",
+}
+
+
 async def init_db() -> None:
     """Open the database connection and create tables if needed. Call once at startup."""
     global _connection
@@ -17,6 +26,15 @@ async def init_db() -> None:
             guild_id TEXT NOT NULL,
             word TEXT NOT NULL,
             PRIMARY KEY (guild_id, word)
+        )
+        """
+    )
+    await _connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            guild_id TEXT PRIMARY KEY,
+            do_links_trigger INTEGER NOT NULL DEFAULT 0,
+            do_medias_trigger INTEGER NOT NULL DEFAULT 0
         )
         """
     )
@@ -73,3 +91,36 @@ async def add_words(guild_id: str, words: list[str]) -> tuple[int, int]:
             added += 1
     skipped = len(words) - added
     return added, skipped
+
+
+async def get_settings(guild_id: str) -> dict:
+    """Return this guild's settings, falling back to defaults if none are stored yet."""
+    async with _connection.execute(
+        "SELECT do_links_trigger, do_medias_trigger FROM guild_settings WHERE guild_id = ?", (guild_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return dict(DEFAULT_SETTINGS)
+    return {"doLinksTrigger": bool(row[0]), "doMediasTrigger": bool(row[1])}
+
+
+async def set_setting(guild_id: str, parameter: str, value: bool) -> None:
+    """Set a single setting by its public parameter name (e.g. 'doLinksTrigger')."""
+    if parameter not in _SETTING_COLUMNS:
+        raise ValueError(f"Unknown setting parameter: {parameter}")
+    column = _SETTING_COLUMNS[parameter]
+    await _connection.execute(
+        f"""
+        INSERT INTO guild_settings (guild_id, {column}) VALUES (?, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET {column} = excluded.{column}
+        """,
+        (guild_id, int(value)),
+    )
+    await _connection.commit()
+
+
+async def get_all_setting_guild_ids() -> list[str]:
+    """Return every guild_id that has a settings row stored."""
+    async with _connection.execute("SELECT guild_id FROM guild_settings") as cursor:
+        rows = await cursor.fetchall()
+    return [row[0] for row in rows]

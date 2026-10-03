@@ -19,7 +19,11 @@ DELETE_DELAY = 0.1  # seconds to wait before deleting the original message (loca
 PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
 WORDS_PER_PAGE = 20  # max words shown per page in /grimevasion list
 
+LINK_PATTERN = re.compile(r"(https?://|www\.)\S+", re.IGNORECASE)
+SETTINGS_PARAMETERS = ["doLinksTrigger", "doMediasTrigger"]  # valid /grimevasion configure parameter values
+
 guild_patterns: dict[str, re.Pattern] = {}  # cache: guild_id -> compiled regex
+guild_settings: dict[str, dict] = {}        # cache: guild_id -> {"doLinksTrigger": bool, "doMediasTrigger": bool}
 
 
 def build_pattern(words: list[str]) -> re.Pattern | None:
@@ -31,6 +35,14 @@ def build_pattern(words: list[str]) -> re.Pattern | None:
 async def refresh_pattern(guild_id: str) -> None:
     words = await db.get_words(guild_id)
     guild_patterns[guild_id] = build_pattern(words)
+
+
+async def refresh_settings(guild_id: str) -> None:
+    guild_settings[guild_id] = await db.get_settings(guild_id)
+
+
+def get_cached_settings(guild_id: str) -> dict:
+    return guild_settings.get(guild_id, dict(db.DEFAULT_SETTINGS))
 
 
 def list_default_word_lists() -> list[str]:
@@ -119,6 +131,8 @@ async def on_ready():
     print(f"Logged in as {client.user}")
     for guild_id in await db.get_all_guild_ids():
         await refresh_pattern(guild_id)
+    for guild_id in await db.get_all_setting_guild_ids():
+        await refresh_settings(guild_id)
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +197,16 @@ async def grim_evasion_info(interaction: discord.Interaction):
     embed.add_field(
         name="/grimevasion lists add `name`",
         value="Imports a default word list into this server's trigger list. Requires **Manage Server**.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/grimevasion configure `parameter` `value`",
+        value="Enables or disables an automatic trigger setting (doLinksTrigger, doMediasTrigger). Requires **Manage Server**.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/grimevasion parameters",
+        value="Shows this server's current settings.",
         inline=False,
     )
     embed.set_footer(text="Messages replying to another message keep a small preview and link.")
@@ -499,14 +523,82 @@ async def grim_evasion_lists_add_error(interaction: discord.Interaction, error: 
         await interaction.response.send_message("Something went wrong.", ephemeral=True)
 
 
+# ---------------------------------------------------------------------------
+# /grimevasion configure
+# ---------------------------------------------------------------------------
+
+async def settings_parameter_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    filtered = [p for p in SETTINGS_PARAMETERS if current.lower() in p.lower()]
+    return [app_commands.Choice(name=p, value=p) for p in filtered]
+
+
+@grimevasion_group.command(name="configure", description="Enable or disable an automatic trigger setting for this server")
+@app_commands.describe(parameter="The setting to change", value="Enable (True) or disable (False)")
+@app_commands.autocomplete(parameter=settings_parameter_autocomplete)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def grim_evasion_configure(interaction: discord.Interaction, parameter: str, value: bool):
+    if parameter not in SETTINGS_PARAMETERS:
+        await interaction.response.send_message(
+            f"Unknown parameter `{parameter}`. Valid options: {', '.join(SETTINGS_PARAMETERS)}",
+            ephemeral=True,
+        )
+        return
+
+    guild_id = str(interaction.guild_id)
+    await db.set_setting(guild_id, parameter, value)
+    await refresh_settings(guild_id)
+
+    state = "enabled" if value else "disabled"
+    await interaction.response.send_message(f"`{parameter}` is now **{state}** for this server.", ephemeral=True)
+
+
+@grim_evasion_configure.error
+async def grim_evasion_configure_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("You need the Manage Server permission to use this.", ephemeral=True)
+    else:
+        print(f"Command error: {error}")
+        await interaction.response.send_message("Something went wrong.", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# /grimevasion parameters
+# ---------------------------------------------------------------------------
+
+@grimevasion_group.command(name="parameters", description="Show this server's GrimEvasion settings")
+async def grim_evasion_parameters(interaction: discord.Interaction):
+    guild_id = str(interaction.guild_id)
+    settings = await db.get_settings(guild_id)
+
+    embed = discord.Embed(
+        title=f"Settings — {interaction.guild.name}",
+        color=discord.Color.blurple(),
+    )
+    for param in SETTINGS_PARAMETERS:
+        state = "✅ Enabled" if settings[param] else "❌ Disabled"
+        embed.add_field(name=param, value=state, inline=True)
+    embed.set_footer(text="Use /grimevasion configure parameter:<name> value:<true/false> to change these.")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @client.event
 async def on_message(msg: discord.Message):
     # Ignore bots/webhooks (prevents infinite loops) and DMs
     if msg.author.bot or not msg.guild:
         return
 
-    pattern = guild_patterns.get(str(msg.guild.id))
-    if not pattern or not pattern.search(msg.content):
+    guild_id = str(msg.guild.id)
+    pattern = guild_patterns.get(guild_id)
+    settings = get_cached_settings(guild_id)
+
+    word_trigger = bool(pattern and pattern.search(msg.content))
+    link_trigger = settings["doLinksTrigger"] and bool(LINK_PATTERN.search(msg.content))
+    media_trigger = settings["doMediasTrigger"] and bool(msg.attachments)
+
+    if not (word_trigger or link_trigger or media_trigger):
         return
 
     channel = msg.channel

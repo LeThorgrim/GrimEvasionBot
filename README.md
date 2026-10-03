@@ -1,6 +1,6 @@
 # GrimEvasionBot
 
-A Discord bot that proxies messages containing trigger words: it deletes the original message and reposts it via webhook using the author's name and avatar. Each server (guild) has its own word list.
+A Discord bot that proxies messages containing trigger words: it deletes the original message and reposts it via webhook using the author's name and avatar. Each server (guild) has its own word list and settings.
 
 ## TODO List
 
@@ -8,9 +8,10 @@ A Discord bot that proxies messages containing trigger words: it deletes the ori
 
 ## Features
 
-- Per-guild trigger word list, stored in a SQLite database (`grimevasion.db`) via `aiosqlite`
+- Per-guild trigger word list and settings, stored in a SQLite database (`grimevasion.db`) via `aiosqlite`
 - All commands grouped under `/grimevasion`, with nested subcommands (`/grimevasion word add`, `/grimevasion lists show`, etc.)
 - Default word lists, stored as `.json` files in `wordLists/`, that can be previewed and imported into any guild
+- Per-guild toggles to also trigger on messages containing links (`doLinksTrigger`) or attachments (`doMediasTrigger`), independent of the word list
 - Reposts via webhook, preserving attachments
 - Works in threads
 - If the proxied message is a reply, shows a small clickable preview linking to the original
@@ -61,9 +62,12 @@ python bot.py
 - `/grimevasion lists list` — list the default word lists available in `wordLists/`.
 - `/grimevasion lists show name:<list name> page:<number>(optional)` — preview the content of a specific default list, paginated.
 - `/grimevasion lists add name:<list name>` — import a default list's words into this server's trigger list (requires **Manage Server**), skipping words already present.
+- `/grimevasion configure parameter:<doLinksTrigger|doMediasTrigger> value:<true/false>` — enable or disable an automatic trigger setting for this server (requires **Manage Server**), with autocomplete on the parameter name.
+- `/grimevasion parameters` — show this server's current settings.
 
 ## Notes
 
-- Trigger words are stored in `grimevasion.db` (SQLite), created automatically on first run via `db.py`. It's gitignored since it may contain server-specific or sensitive words.
+- Trigger words and per-guild settings are stored in `grimevasion.db` (SQLite), created automatically on first run via `db.py`. It's gitignored since it may contain server-specific or sensitive words.
 - SQLite handles concurrent writes safely for a single bot process. If you ever shard across multiple processes/machines sharing the same data, move to a networked database instead.
+- `doLinksTrigger` and `doMediasTrigger` are both disabled by default; a message only needs to match one active condition (word, link, or attachment) to be proxied.
 - If the bot replies to a message that gets deleted afterwards, the bot answer is not updated.
