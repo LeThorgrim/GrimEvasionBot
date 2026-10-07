@@ -5,6 +5,7 @@ import asyncio
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
+from rapidfuzz.distance import Levenshtein
 
 import db
 
@@ -20,10 +21,18 @@ PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
 WORDS_PER_PAGE = 20  # max words shown per page in /grimevasion list
 
 LINK_PATTERN = re.compile(r"(https?://|www\.)\S+", re.IGNORECASE)
-SETTINGS_PARAMETERS = ["doLinksTrigger", "doMediasTrigger"]  # valid /grimevasion configure parameter values
+TOKEN_PATTERN = re.compile(r"[a-z0-9@$!]+")  # word-like clusters, leetspeak chars included
+SETTINGS_PARAMETERS = ["doLinksTrigger", "doMediasTrigger", "doFuzzyDetection"]  # valid /grimevasion configure values
 
-guild_patterns: dict[str, re.Pattern] = {}  # cache: guild_id -> compiled regex
-guild_settings: dict[str, dict] = {}        # cache: guild_id -> {"doLinksTrigger": bool, "doMediasTrigger": bool}
+# Leetspeak -> letter substitutions applied before fuzzy comparison
+LEETSPEAK_MAP = str.maketrans({
+    "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t",
+    "@": "a", "$": "s", "!": "i",
+})
+
+guild_patterns: dict[str, re.Pattern] = {}       # cache: guild_id -> compiled regex (exact match)
+guild_normalized_words: dict[str, list[str]] = {}  # cache: guild_id -> normalized trigger words (for fuzzy match)
+guild_settings: dict[str, dict] = {}              # cache: guild_id -> settings dict
 
 
 def build_pattern(words: list[str]) -> re.Pattern | None:
@@ -32,9 +41,53 @@ def build_pattern(words: list[str]) -> re.Pattern | None:
     return re.compile(r"\b(" + "|".join(map(re.escape, words)) + r")\b", re.IGNORECASE)
 
 
+def normalize_word(word: str) -> str:
+    """Lowercase, de-leetspeak, strip non-alphanumerics, and collapse repeated letters."""
+    word = word.lower().translate(LEETSPEAK_MAP)
+    word = re.sub(r"[^a-z0-9]", "", word)
+    word = re.sub(r"(.)\1+", r"\1", word)  # "moooot" -> "mot", "mott" -> "mot"
+    return word
+
+
+def fuzzy_tolerance(length: int) -> int:
+    """Max edit distance allowed for a normalized word of this length. 0 = fuzzy skipped (too short, too risky)."""
+    if length <= 3:
+        return 0
+    if length <= 6:
+        return 1
+    return 2
+
+
+def fuzzy_match(token: str, normalized_triggers: list[str]) -> bool:
+    norm_token = normalize_word(token)
+    if not norm_token:
+        return False
+
+    for trigger_norm in normalized_triggers:
+        if not trigger_norm:
+            continue
+        if norm_token == trigger_norm:
+            # Identical once leetspeak/separators/repeated letters are normalized away
+            # (e.g. "moooot", "m0t", "mott" vs "mot") — always counts, even for short words.
+            return True
+        allowed = min(fuzzy_tolerance(len(norm_token)), fuzzy_tolerance(len(trigger_norm)))
+        if allowed == 0:
+            continue  # too short for genuine typo tolerance beyond exact normalized match
+        if abs(len(trigger_norm) - len(norm_token)) > allowed:
+            continue  # cheap length filter before the actual distance computation
+        if Levenshtein.distance(norm_token, trigger_norm) <= allowed:
+            return True
+    return False
+
+
+def tokenize(text: str) -> list[str]:
+    return TOKEN_PATTERN.findall(text.lower())
+
+
 async def refresh_pattern(guild_id: str) -> None:
     words = await db.get_words(guild_id)
     guild_patterns[guild_id] = build_pattern(words)
+    guild_normalized_words[guild_id] = [normalize_word(w) for w in words]
 
 
 async def refresh_settings(guild_id: str) -> None:
@@ -201,7 +254,7 @@ async def grim_evasion_info(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/grimevasion configure `parameter` `value`",
-        value="Enables or disables an automatic trigger setting (doLinksTrigger, doMediasTrigger). Requires **Manage Server**.",
+        value="Enables or disables an automatic trigger setting (doLinksTrigger, doMediasTrigger, doFuzzyDetection). Requires **Manage Server**.",
         inline=False,
     )
     embed.add_field(
@@ -598,7 +651,14 @@ async def on_message(msg: discord.Message):
     link_trigger = settings["doLinksTrigger"] and bool(LINK_PATTERN.search(msg.content))
     media_trigger = settings["doMediasTrigger"] and bool(msg.attachments)
 
-    if not (word_trigger or link_trigger or media_trigger):
+    # Fuzzy detection only runs if the exact match above found nothing, to keep the common case cheap
+    fuzzy_trigger = False
+    if not word_trigger and settings["doFuzzyDetection"]:
+        normalized_triggers = guild_normalized_words.get(guild_id, [])
+        if normalized_triggers:
+            fuzzy_trigger = any(fuzzy_match(token, normalized_triggers) for token in tokenize(msg.content))
+
+    if not (word_trigger or link_trigger or media_trigger or fuzzy_trigger):
         return
 
     channel = msg.channel
