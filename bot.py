@@ -22,6 +22,16 @@ WORDS_PER_PAGE = 20  # max words shown per page in /grimevasion list
 
 LINK_PATTERN = re.compile(r"(https?://|www\.)\S+", re.IGNORECASE)
 TOKEN_PATTERN = re.compile(r"[a-z0-9@$!]+")  # word-like clusters, leetspeak chars included
+
+# Catches evasion by separator-stuffing: "m.o.t", "m-o-t", "m_o_t", "m o t".
+# Each piece must be a COMPLETE short (<=3 char) token — the lookarounds ensure it isn't
+# immediately preceded/followed by another word character, so longer words (e.g. "check",
+# "this") can never be sliced into fragments and accidentally chained together.
+_CHAIN_PIECE = r"(?<![a-z0-9@$!])[a-z0-9@$!]{1,3}(?![a-z0-9@$!])"
+SEPARATOR_CHAIN_PATTERN = re.compile(
+    rf"{_CHAIN_PIECE}(?:[ \-_.]+{_CHAIN_PIECE}){{1,}}", re.IGNORECASE
+)
+SEPARATOR_STRIP_PATTERN = re.compile(r"[ \-_.]+")
 SETTINGS_PARAMETERS = ["doLinksTrigger", "doMediasTrigger", "doFuzzyDetection"]  # valid /grimevasion configure values
 
 # Leetspeak -> letter substitutions applied before fuzzy comparison
@@ -82,6 +92,16 @@ def fuzzy_match(token: str, normalized_triggers: list[str]) -> bool:
 
 def tokenize(text: str) -> list[str]:
     return TOKEN_PATTERN.findall(text.lower())
+
+
+def extract_separator_chains(text: str) -> list[str]:
+    """Find runs of short tokens chained by spaces/./-/_ (e.g. 'm.o.t', 'm_o_t', 'm o t')
+    and return each chain with the separators stripped out, as one candidate string per chain."""
+    chains = []
+    for match in SEPARATOR_CHAIN_PATTERN.finditer(text.lower()):
+        merged = SEPARATOR_STRIP_PATTERN.sub("", match.group(0))
+        chains.append(merged)
+    return chains
 
 
 async def refresh_pattern(guild_id: str) -> None:
@@ -656,7 +676,11 @@ async def on_message(msg: discord.Message):
     if not word_trigger and settings["doFuzzyDetection"]:
         normalized_triggers = guild_normalized_words.get(guild_id, [])
         if normalized_triggers:
-            fuzzy_trigger = any(fuzzy_match(token, normalized_triggers) for token in tokenize(msg.content))
+            per_token_hit = any(fuzzy_match(token, normalized_triggers) for token in tokenize(msg.content))
+            chain_hit = any(
+                fuzzy_match(chain, normalized_triggers) for chain in extract_separator_chains(msg.content)
+            )
+            fuzzy_trigger = per_token_hit or chain_hit
 
     if not (word_trigger or link_trigger or media_trigger or fuzzy_trigger):
         return

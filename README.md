@@ -8,7 +8,7 @@ A Discord bot that proxies messages containing trigger words: it deletes the ori
 - All commands grouped under `/grimevasion`, with nested subcommands (`/grimevasion word add`, `/grimevasion lists show`, etc.)
 - Default word lists, stored as `.json` files in `wordLists/`, that can be previewed and imported into any guild
 - Per-guild toggles to also trigger on messages containing links (`doLinksTrigger`) or attachments (`doMediasTrigger`), independent of the word list
-- Per-guild fuzzy detection (`doFuzzyDetection`), using `rapidfuzz`, that catches typos, leetspeak (`d0t`), and doubled/repeated letters (`doooot`) even when the exact word isn't typed
+- Per-guild fuzzy detection (`doFuzzyDetection`), using `rapidfuzz`, that catches typos, leetspeak (`d0t`), doubled/repeated letters (`doooot`), and separator-stuffed spelling (`d.o.t`, `d-o-t`, `d o t`) even when the exact word isn't typed
 - Reposts via webhook, preserving attachments
 - Works in threads
 - If the proxied message is a reply, shows a small clickable preview linking to the original
@@ -67,5 +67,6 @@ python bot.py
 - Trigger words and per-guild settings are stored in `grimevasion.db` (SQLite), created automatically on first run via `db.py`. It's gitignored since it may contain server-specific or sensitive words.
 - SQLite handles concurrent writes safely for a single bot process. If you ever shard across multiple processes/machines sharing the same data, move to a networked database instead.
 - `doLinksTrigger`, `doMediasTrigger`, and `doFuzzyDetection` are all disabled by default; a message only needs to match one active condition (word, link, attachment, or fuzzy match) to be proxied.
-- Fuzzy detection only runs when the exact word match found nothing, to keep the common case cheap. It normalizes words (lowercase, de-leetspeak, collapse repeated letters) before comparing, and skips genuine typo tolerance for words of 3 letters or fewer to avoid false positives.
+- `doFuzzyDetection` covers both per-word fuzzy matching (typos, leetspeak, repeated letters) and separator-stuffed spelling (letters chained by spaces, `.`, `-`, or `_`, e.g. `d o t`) — both checks only run when the exact word match found nothing, to keep the common case cheap.
+- Fuzzy matching normalizes words (lowercase, de-leetspeak, collapse repeated letters) before comparing, and skips genuine typo tolerance for words of 3 letters or fewer to avoid false positives. The separator-chain check only chains together complete short tokens (≤3 characters) — it can't fragment or merge longer words, so an ordinary sentence won't accidentally form a false match.
 - If the bot replies to a message that gets deleted afterwards, the bot answer is not updated.
