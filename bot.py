@@ -2,6 +2,8 @@ import os
 import re
 import json
 import asyncio
+from collections import OrderedDict
+
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
@@ -19,6 +21,7 @@ WORD_LISTS_DIR = "wordLists"  # folder containing default word list .json files
 DELETE_DELAY = 0.1  # seconds to wait before deleting the original message (local display for users is bugged when too low)
 PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
 WORDS_PER_PAGE = 20  # max words shown per page in /grimevasion list
+PROXY_AUTHORS_MAX = 5000  # max remembered proxied messages (keeps memory bounded)
 
 LINK_PATTERN = re.compile(r"(https?://|www\.)\S+", re.IGNORECASE)
 TOKEN_PATTERN = re.compile(r"[a-z0-9@$!]+")  # word-like clusters, leetspeak chars included
@@ -165,6 +168,32 @@ client = ProxyClient()
 
 webhooks: dict[int, discord.Webhook] = {}  # cache: channel id -> webhook
 
+# proxied (webhook) message id -> id of the REAL author who wrote it.
+# Discord only exposes the webhook as the author of these messages, so we remember
+# who was behind each one to be able to mention the right person in replies.
+# In-memory only: entries are lost on restart (replies then fall back to a plain name).
+proxy_authors: "OrderedDict[int, int]" = OrderedDict()
+
+
+def remember_proxy_author(message_id: int, author_id: int) -> None:
+    proxy_authors[message_id] = author_id
+    while len(proxy_authors) > PROXY_AUTHORS_MAX:
+        proxy_authors.popitem(last=False)  # drop the oldest entry
+
+
+def strip_reply_prefix(content: str) -> str:
+    """Remove the '-# ↱ Replying to ...' header our own proxy adds, so a reply to a
+    proxied reply previews the actual text and not the previous header."""
+    if not content.startswith("-# ↱"):
+        return content
+    lines = content.split("\n")
+    i = 0
+    while i < len(lines) and lines[i].startswith("-# "):
+        i += 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    return "\n".join(lines[i:])
+
 
 async def get_webhook(channel: discord.abc.GuildChannel) -> discord.Webhook:
     if channel.id in webhooks:
@@ -193,7 +222,20 @@ async def build_reply_prefix(msg: discord.Message) -> str:
     if isinstance(replied, discord.DeletedReferencedMessage):
         return "-# ↱ *Replying to a deleted message*\n\n"
 
-    preview = replied.content.replace("\n", " ").strip()
+    # Webhook messages: the "author" is the webhook, not the real person.
+    # Look up the real author we remembered; otherwise fall back to a plain name (no ping).
+    if replied.webhook_id is not None:
+        real_author_id = proxy_authors.get(replied.id)
+        if real_author_id:
+            author_label = f"<@{real_author_id}>"
+        else:
+            author_label = f"**{replied.author.display_name}**"
+        raw_content = strip_reply_prefix(replied.content)
+    else:
+        author_label = f"<@{replied.author.id}>"
+        raw_content = replied.content
+
+    preview = raw_content.replace("\n", " ").strip()
     preview = LINK_PATTERN.sub("<URL>", preview)
     if len(preview) > PREVIEW_LENGTH:
         preview = preview[:PREVIEW_LENGTH - 3] + "..."
@@ -201,7 +243,7 @@ async def build_reply_prefix(msg: discord.Message) -> str:
         preview = "*[attachment/embed]*"
 
     # "-# " renders as small subtext in Discord; <@id> renders as a clickable mention
-    return f"-# ↱ Replying to <@{replied.author.id}>: {preview} • [Jump to message]({replied.jump_url})\n-# ───────────────────\n"
+    return f"-# ↱ Replying to {author_label}: {preview} • [Jump to message]({replied.jump_url})\n-# ───────────────────\n"
 
 
 @client.event
@@ -690,7 +732,9 @@ async def on_message(msg: discord.Message):
     if not (word_trigger or link_trigger or media_trigger or fuzzy_trigger):
         return
 
-    # Reproduce Discord's native behavior about embed links
+    # Reproduce Discord's native behavior about embed links: without the permission,
+    # the author's links wouldn't have been previewed, so the repost must not preview them either.
+    # Computed on the ORIGINAL channel (thread included) before we swap to the parent below.
     can_embed = msg.channel.permissions_for(msg.author).embed_links
 
     channel = msg.channel
@@ -709,8 +753,9 @@ async def on_message(msg: discord.Message):
     content = reply_prefix + msg.content
     files = [await a.to_file() for a in msg.attachments]
 
+    sent = None
     try:
-        await hook.send(
+        sent = await hook.send(
             content=content,
             username=msg.author.display_name,
             avatar_url=msg.author.display_avatar.url,
@@ -718,6 +763,7 @@ async def on_message(msg: discord.Message):
             thread=thread,
             allowed_mentions=discord.AllowedMentions.none(),
             suppress_embeds=not can_embed,
+            wait=True,  # needed to get the sent message back (its id is stored below)
         )
     except discord.NotFound:
         # Webhook was deleted manually on Discord's side, clear cache and retry once
@@ -725,7 +771,7 @@ async def on_message(msg: discord.Message):
         webhooks.pop(channel.id, None)
         try:
             hook = await get_webhook(channel)
-            await hook.send(
+            sent = await hook.send(
                 content=content,
                 username=msg.author.display_name,
                 avatar_url=msg.author.display_avatar.url,
@@ -733,6 +779,7 @@ async def on_message(msg: discord.Message):
                 thread=thread,
                 allowed_mentions=discord.AllowedMentions.none(),
                 suppress_embeds=not can_embed,
+                wait=True,
             )
         except discord.HTTPException as e:
             print(f"Retry failed for message {msg.id}: {e}")
@@ -740,6 +787,10 @@ async def on_message(msg: discord.Message):
     except discord.HTTPException as e:
         print(f"Failed to send webhook message for {msg.id}: {e}")
         return
+
+    # Remember who really wrote this proxied message, for correct mentions in later replies
+    if sent is not None:
+        remember_proxy_author(sent.id, msg.author.id)
 
     await asyncio.sleep(DELETE_DELAY)  # small buffer to avoid client-side render race
 

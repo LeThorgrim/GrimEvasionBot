@@ -69,4 +69,7 @@ python bot.py
 - `doLinksTrigger`, `doMediasTrigger`, and `doFuzzyDetection` are all disabled by default; a message only needs to match one active condition (word, link, attachment, or fuzzy match) to be proxied.
 - `doFuzzyDetection` covers both per-word fuzzy matching (typos, leetspeak, repeated letters) and separator-stuffed spelling (letters chained by spaces, `.`, `-`, or `_`, e.g. `d o t`) — both checks only run when the exact word match found nothing, to keep the common case cheap.
 - Fuzzy matching normalizes words (lowercase, de-leetspeak, collapse repeated letters) before comparing, and skips genuine typo tolerance for words of 3 letters or fewer to avoid false positives. The separator-chain check only chains together complete short tokens (≤3 characters) — it can't fragment or merge longer words, so an ordinary sentence won't accidentally form a false match.
+
+## Known Issues
 - If the bot replies to a message that gets deleted afterwards, the bot answer is not updated.
+- For logical limits, the replies might not tag the correct @.
