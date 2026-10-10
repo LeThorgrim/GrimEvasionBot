@@ -194,6 +194,7 @@ async def build_reply_prefix(msg: discord.Message) -> str:
         return "-# ↱ *Replying to a deleted message*\n\n"
 
     preview = replied.content.replace("\n", " ").strip()
+    preview = LINK_PATTERN.sub("<URL>", preview)
     if len(preview) > PREVIEW_LENGTH:
         preview = preview[:PREVIEW_LENGTH - 3] + "..."
     if not preview:
@@ -689,6 +690,9 @@ async def on_message(msg: discord.Message):
     if not (word_trigger or link_trigger or media_trigger or fuzzy_trigger):
         return
 
+    # Reproduce Discord's native behavior about embed links
+    can_embed = msg.channel.permissions_for(msg.author).embed_links
+
     channel = msg.channel
     thread = discord.utils.MISSING
     if isinstance(channel, discord.Thread):  # webhooks belong to the parent channel
@@ -713,6 +717,7 @@ async def on_message(msg: discord.Message):
             files=files,
             thread=thread,
             allowed_mentions=discord.AllowedMentions.none(),
+            suppress_embeds=not can_embed,
         )
     except discord.NotFound:
         # Webhook was deleted manually on Discord's side, clear cache and retry once
@@ -727,6 +732,7 @@ async def on_message(msg: discord.Message):
                 files=files,
                 thread=thread,
                 allowed_mentions=discord.AllowedMentions.none(),
+                suppress_embeds=not can_embed,
             )
         except discord.HTTPException as e:
             print(f"Retry failed for message {msg.id}: {e}")
