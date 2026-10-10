@@ -149,7 +149,11 @@ intents.message_content = True
 
 class ProxyClient(discord.Client):
     def __init__(self):
-        super().__init__(intents=intents)
+        super().__init__(
+            intents=intents,
+            activity=discord.Activity(type=discord.ActivityType.watching, name="/grimevasion info || ThorgrimCorp."),
+            status=discord.Status.online,
+        )
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
