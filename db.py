@@ -145,3 +145,12 @@ async def get_all_setting_guild_ids() -> list[str]:
     async with _connection.execute("SELECT guild_id FROM guild_settings") as cursor:
         rows = await cursor.fetchall()
     return [row[0] for row in rows]
+
+
+async def clear_words(guild_id: str) -> int:
+    """Delete every trigger word of a guild. Returns how many were removed."""
+    cursor = await _connection.execute(
+        "DELETE FROM guild_words WHERE guild_id = ?", (guild_id,)
+    )
+    await _connection.commit()
+    return cursor.rowcount

@@ -266,6 +266,7 @@ client.tree.add_command(grimevasion_group)
 
 word_group = app_commands.Group(name="word", description="Manage this server's trigger words", parent=grimevasion_group)
 lists_group = app_commands.Group(name="lists", description="Browse and import default word lists", parent=grimevasion_group)
+list_group = app_commands.Group(name="list", description="View or clear this server's trigger words", parent=grimevasion_group)
 
 
 # ---------------------------------------------------------------------------
@@ -300,8 +301,13 @@ async def grim_evasion_info(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
-        name="/grimevasion list `page`",
+        name="/grimevasion list show `page`",
         value="Lists the trigger words configured for this server, with pagination.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/grimevasion list clear",
+        value="Removes ALL trigger words from this server, after a confirmation. Requires **Manage Server**.",
         inline=False,
     )
     embed.add_field(
@@ -396,7 +402,7 @@ class WordListView(discord.ui.View):
             child.disabled = True
 
 
-@grimevasion_group.command(name="list", description="List this server's trigger words")
+@list_group.command(name="show", description="Show this server's trigger words")
 @app_commands.describe(page="Page number to jump to (starts at 1)")
 async def grim_evasion_list(interaction: discord.Interaction, page: int = 1):
     guild_id = str(interaction.guild_id)
@@ -408,6 +414,85 @@ async def grim_evasion_list(interaction: discord.Interaction, page: int = 1):
     view = WordListView(guild_id, interaction.guild.name, page_index, total_pages, interaction.user.id)
 
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# /grimevasion list clear
+# ---------------------------------------------------------------------------
+
+class ClearConfirmView(discord.ui.View):
+    def __init__(self, guild_id: str, requester_id: int, interaction: discord.Interaction):
+        super().__init__(timeout=30)
+        self.guild_id = guild_id
+        self.requester_id = requester_id
+        self.interaction = interaction  # original interaction, used to edit the prompt on timeout
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can use these buttons.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="Yes, clear everything", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        removed = await db.clear_words(self.guild_id)
+        await refresh_pattern(self.guild_id)
+        self._disable_all()
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"🗑️ Cleared **{removed}** trigger word(s).", view=self
+        )
+
+    @discord.ui.button(label="No, cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._disable_all()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Cancelled. No words were removed.", view=self
+        )
+
+    async def on_timeout(self):
+        self._disable_all()
+        try:
+            await self.interaction.edit_original_response(
+                content="⌛ Confirmation timed out. No words were removed.", view=self
+            )
+        except discord.HTTPException:
+            pass
+
+
+@list_group.command(name="clear", description="Remove ALL trigger words from this server")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def grim_evasion_list_clear(interaction: discord.Interaction):
+    guild_id = str(interaction.guild_id)
+    words = await db.get_words(guild_id)
+
+    if not words:
+        await interaction.response.send_message("There are no trigger words to clear.", ephemeral=True)
+        return
+
+    view = ClearConfirmView(guild_id, interaction.user.id, interaction)
+    await interaction.response.send_message(
+        f"⚠️ Are you sure you want to remove **all {len(words)}** trigger word(s) from this server? "
+        "This cannot be undone.",
+        view=view,
+        ephemeral=True,
+    )
+
+
+@grim_evasion_list_clear.error
+async def grim_evasion_list_clear_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("You need the Manage Server permission to use this.", ephemeral=True)
+    else:
+        print(f"Command error: {error}")
+        await interaction.response.send_message("Something went wrong.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
