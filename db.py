@@ -1,4 +1,4 @@
-"""SQLite-backed storage for GrimEvasion's per-guild trigger word lists."""
+"""SQLite-backed storage for GrimEvasion's per-guild trigger word lists, settings and exempt users."""
 
 import aiosqlite
 
@@ -7,13 +7,20 @@ DB_FILE = "grimevasion.db"
 _connection: aiosqlite.Connection | None = None
 
 
-DEFAULT_SETTINGS = {"doLinksTrigger": False, "doMediasTrigger": False, "doFuzzyDetection": False}
+DEFAULT_SETTINGS = {
+    "doLinksTrigger": False,
+    "doMediasTrigger": False,
+    "doFuzzyDetection": False,
+    "allowExemptList": False,
+}
 
 # Maps the public parameter name (used in commands) to its actual column name.
+# Order matters: get_settings() reads columns in this order.
 _SETTING_COLUMNS = {
     "doLinksTrigger": "do_links_trigger",
     "doMediasTrigger": "do_medias_trigger",
     "doFuzzyDetection": "do_fuzzy_detection",
+    "allowExemptList": "allow_exempt_list",
 }
 
 
@@ -36,7 +43,17 @@ async def init_db() -> None:
             guild_id TEXT PRIMARY KEY,
             do_links_trigger INTEGER NOT NULL DEFAULT 0,
             do_medias_trigger INTEGER NOT NULL DEFAULT 0,
-            do_fuzzy_detection INTEGER NOT NULL DEFAULT 0
+            do_fuzzy_detection INTEGER NOT NULL DEFAULT 0,
+            allow_exempt_list INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    await _connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS guild_exempt_users (
+            guild_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
         )
         """
     )
@@ -61,6 +78,10 @@ async def close_db() -> None:
     if _connection is not None:
         await _connection.close()
 
+
+# ---------------------------------------------------------------------------
+# Trigger words
+# ---------------------------------------------------------------------------
 
 async def get_words(guild_id: str) -> list[str]:
     """Return all trigger words for a guild, sorted alphabetically."""
@@ -109,20 +130,30 @@ async def add_words(guild_id: str, words: list[str]) -> tuple[int, int]:
     return added, skipped
 
 
+async def clear_words(guild_id: str) -> int:
+    """Delete every trigger word of a guild. Returns how many were removed."""
+    cursor = await _connection.execute(
+        "DELETE FROM guild_words WHERE guild_id = ?", (guild_id,)
+    )
+    await _connection.commit()
+    return cursor.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+
 async def get_settings(guild_id: str) -> dict:
     """Return this guild's settings, falling back to defaults if none are stored yet."""
+    columns = ", ".join(_SETTING_COLUMNS.values())  # constants only, never user input
     async with _connection.execute(
-        "SELECT do_links_trigger, do_medias_trigger, do_fuzzy_detection FROM guild_settings WHERE guild_id = ?",
+        f"SELECT {columns} FROM guild_settings WHERE guild_id = ?",
         (guild_id,),
     ) as cursor:
         row = await cursor.fetchone()
     if row is None:
         return dict(DEFAULT_SETTINGS)
-    return {
-        "doLinksTrigger": bool(row[0]),
-        "doMediasTrigger": bool(row[1]),
-        "doFuzzyDetection": bool(row[2]),
-    }
+    return {parameter: bool(value) for parameter, value in zip(_SETTING_COLUMNS, row)}
 
 
 async def set_setting(guild_id: str, parameter: str, value: bool) -> None:
@@ -147,10 +178,42 @@ async def get_all_setting_guild_ids() -> list[str]:
     return [row[0] for row in rows]
 
 
-async def clear_words(guild_id: str) -> int:
-    """Delete every trigger word of a guild. Returns how many were removed."""
+# ---------------------------------------------------------------------------
+# Exempt users
+# ---------------------------------------------------------------------------
+
+async def get_exempt_users(guild_id: str) -> list[str]:
+    """Return the ids of every user on this guild's exempt list."""
+    async with _connection.execute(
+        "SELECT user_id FROM guild_exempt_users WHERE guild_id = ?", (guild_id,)
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return [row[0] for row in rows]
+
+
+async def get_all_exempt_guild_ids() -> list[str]:
+    """Return every guild_id that has at least one exempt user stored."""
+    async with _connection.execute("SELECT DISTINCT guild_id FROM guild_exempt_users") as cursor:
+        rows = await cursor.fetchall()
+    return [row[0] for row in rows]
+
+
+async def add_exempt_user(guild_id: str, user_id: str) -> bool:
+    """Add a user to the exempt list. Returns False if they were already on it."""
+    try:
+        await _connection.execute(
+            "INSERT INTO guild_exempt_users (guild_id, user_id) VALUES (?, ?)", (guild_id, user_id)
+        )
+        await _connection.commit()
+        return True
+    except aiosqlite.IntegrityError:
+        return False  # already exists (guild_id, user_id) pair
+
+
+async def remove_exempt_user(guild_id: str, user_id: str) -> bool:
+    """Remove a user from the exempt list. Returns False if they weren't on it."""
     cursor = await _connection.execute(
-        "DELETE FROM guild_words WHERE guild_id = ?", (guild_id,)
+        "DELETE FROM guild_exempt_users WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
     )
     await _connection.commit()
-    return cursor.rowcount
+    return cursor.rowcount > 0

@@ -18,7 +18,7 @@ if not TOKEN:
     raise SystemExit("DISCORD_TOKEN not found: check your .env file")
 
 WORD_LISTS_DIR = "wordLists"  # folder containing default word list .json files
-DELETE_DELAY = 0.1  # seconds to wait before deleting the original message (local display for users is bugged when too low)
+DELETE_DELAY = 0.01  # seconds to wait before deleting the original message (local display for users is bugged when too low)
 PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
 WORDS_PER_PAGE = 20  # max words shown per page in /grimevasion list
 PROXY_AUTHORS_MAX = 5000  # max remembered proxied messages (keeps memory bounded)
@@ -35,7 +35,7 @@ SEPARATOR_CHAIN_PATTERN = re.compile(
     rf"{_CHAIN_PIECE}(?:[ \-_.]+{_CHAIN_PIECE}){{1,}}", re.IGNORECASE
 )
 SEPARATOR_STRIP_PATTERN = re.compile(r"[ \-_.]+")
-SETTINGS_PARAMETERS = ["doLinksTrigger", "doMediasTrigger", "doFuzzyDetection"]  # valid /grimevasion configure values
+SETTINGS_PARAMETERS = ["doLinksTrigger", "doMediasTrigger", "doFuzzyDetection", "allowExemptList"]  # valid /grimevasion configure values
 
 # Leetspeak -> letter substitutions applied before fuzzy comparison
 LEETSPEAK_MAP = str.maketrans({
@@ -46,6 +46,7 @@ LEETSPEAK_MAP = str.maketrans({
 guild_patterns: dict[str, re.Pattern] = {}       # cache: guild_id -> compiled regex (exact match)
 guild_normalized_words: dict[str, list[str]] = {}  # cache: guild_id -> normalized trigger words (for fuzzy match)
 guild_settings: dict[str, dict] = {}              # cache: guild_id -> settings dict
+guild_exempt: dict[str, set[str]] = {}            # cache: guild_id -> user ids (as str) on the exempt list
 
 
 def build_pattern(words: list[str]) -> re.Pattern | None:
@@ -115,6 +116,10 @@ async def refresh_pattern(guild_id: str) -> None:
 
 async def refresh_settings(guild_id: str) -> None:
     guild_settings[guild_id] = await db.get_settings(guild_id)
+
+
+async def refresh_exempt(guild_id: str) -> None:
+    guild_exempt[guild_id] = set(await db.get_exempt_users(guild_id))
 
 
 def get_cached_settings(guild_id: str) -> dict:
@@ -253,6 +258,8 @@ async def on_ready():
         await refresh_pattern(guild_id)
     for guild_id in await db.get_all_setting_guild_ids():
         await refresh_settings(guild_id)
+    for guild_id in await db.get_all_exempt_guild_ids():
+        await refresh_exempt(guild_id)
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +334,15 @@ async def grim_evasion_info(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/grimevasion configure `parameter` `value`",
-        value="Enables or disables an automatic trigger setting (doLinksTrigger, doMediasTrigger, doFuzzyDetection). Requires **Manage Server**.",
+        value="Enables or disables a server setting (doLinksTrigger, doMediasTrigger, doFuzzyDetection, allowExemptList). Requires **Manage Server**.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/grimevasion exempt `value`",
+        value=(
+            "Adds yourself to (`true`) or removes yourself from (`false`) this server's exempt list. "
+            "Exempt members are ignored by the proxy, but only while `allowExemptList` is enabled."
+        ),
         inline=False,
     )
     embed.add_field(
@@ -789,6 +804,56 @@ async def grim_evasion_parameters(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# ---------------------------------------------------------------------------
+# /grimevasion exempt
+# ---------------------------------------------------------------------------
+
+@grimevasion_group.command(name="exempt", description="Add or remove yourself from this server's exempt list")
+@app_commands.describe(value="True to add yourself to the exempt list, False to remove yourself")
+async def grim_evasion_exempt(interaction: discord.Interaction, value: bool):
+    # Always usable by anyone: the reply states whether the exempt list is actually applied.
+    if interaction.guild_id is None:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    guild_id = str(interaction.guild_id)
+    user_id = str(interaction.user.id)
+
+    if value:
+        changed = await db.add_exempt_user(guild_id, user_id)
+        headline = (
+            "You've been **added** to the exempt list."
+            if changed else "You're **already** on the exempt list."
+        )
+    else:
+        changed = await db.remove_exempt_user(guild_id, user_id)
+        headline = (
+            "You've been **removed** from the exempt list."
+            if changed else "You weren't on the exempt list."
+        )
+
+    await refresh_exempt(guild_id)
+
+    enabled = get_cached_settings(guild_id)["allowExemptList"]
+
+    if enabled and value:
+        status = "✅ `allowExemptList` is **enabled** on this server: your messages will **not** be proxied, even when they match a trigger."
+    elif enabled:
+        status = "✅ `allowExemptList` is **enabled** on this server: your messages **will** be proxied when they match a trigger."
+    elif value:
+        status = (
+            "⚠️ `allowExemptList` is currently **disabled** on this server: your messages **will still** be proxied "
+            "when they match a trigger. You'll be exempt as soon as someone with **Manage Server** enables it."
+        )
+    else:
+        status = (
+            "ℹ️ `allowExemptList` is **disabled** on this server: the exempt list isn't applied, "
+            "so your messages are proxied when they match a trigger either way."
+        )
+
+    await interaction.response.send_message(f"{headline}\n{status}", ephemeral=True)
+
+
 @client.event
 async def on_message(msg: discord.Message):
     # Ignore bots/webhooks (prevents infinite loops) and DMs
@@ -796,8 +861,14 @@ async def on_message(msg: discord.Message):
         return
 
     guild_id = str(msg.guild.id)
-    pattern = guild_patterns.get(guild_id)
     settings = get_cached_settings(guild_id)
+
+    # Exempt members bypass the proxy entirely, but only if the guild enabled the exempt list.
+    # Checked first: it's a cheap set lookup and avoids all the detection work below.
+    if settings["allowExemptList"] and str(msg.author.id) in guild_exempt.get(guild_id, ()):
+        return
+
+    pattern = guild_patterns.get(guild_id)
 
     word_trigger = bool(pattern and pattern.search(msg.content))
     link_trigger = settings["doLinksTrigger"] and bool(LINK_PATTERN.search(msg.content))
@@ -846,7 +917,7 @@ async def on_message(msg: discord.Message):
             avatar_url=msg.author.display_avatar.url,
             files=files,
             thread=thread,
-            allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True),
+            allowed_mentions=discord.AllowedMentions.none(),
             suppress_embeds=not can_embed,
             wait=True,  # needed to get the sent message back (its id is stored below)
         )
@@ -862,7 +933,7 @@ async def on_message(msg: discord.Message):
                 avatar_url=msg.author.display_avatar.url,
                 files=files,
                 thread=thread,
-                allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True),
+                allowed_mentions=discord.AllowedMentions.none(),
                 suppress_embeds=not can_embed,
                 wait=True,
             )
