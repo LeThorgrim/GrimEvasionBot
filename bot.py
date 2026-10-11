@@ -23,6 +23,13 @@ PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
 WORDS_PER_PAGE = 20  # max words shown per page in /grimevasion list
 PROXY_AUTHORS_MAX = 5000  # max remembered proxied messages (keeps memory bounded)
 
+# Fuzzy typo tolerance (edit distance) depends on the NORMALIZED word length. Shorter words only
+# match exactly once normalized (leetspeak, repeated letters, separators), because one typo on a
+# 4-5 letter word turns far too many everyday words into false positives ("that" ~ "twat", "pardo" ~ "paedo").
+FUZZY_ONE_EDIT_MIN_LENGTH = 6   # from this length: 1 edit tolerated
+FUZZY_TWO_EDITS_MIN_LENGTH = 9  # from this length: 2 edits tolerated
+FUZZY_MIN_NORMALIZED_LENGTH = 2  # collapsing repeated letters never shrinks a word below this length
+
 LINK_PATTERN = re.compile(r"(https?://|www\.)\S+", re.IGNORECASE)
 TOKEN_PATTERN = re.compile(r"[a-z0-9@$!]+")  # word-like clusters, leetspeak chars included
 
@@ -59,17 +66,20 @@ def normalize_word(word: str) -> str:
     """Lowercase, de-leetspeak, strip non-alphanumerics, and collapse repeated letters."""
     word = word.lower().translate(LEETSPEAK_MAP)
     word = re.sub(r"[^a-z0-9]", "", word)
-    word = re.sub(r"(.)\1+", r"\1", word)  # "moooot" -> "mot", "mott" -> "mot"
-    return word
+    collapsed = re.sub(r"(.)\1+", r"\1", word)  # "moooot" -> "mot", "mott" -> "mot"
+    # Collapsing must not shrink a word to a single letter: "kkk" / "xxx" would become "k" / "x" and
+    # then match every lone "k" or "x" typed in chat. In that case keep the uncollapsed form.
+    return collapsed if len(collapsed) >= FUZZY_MIN_NORMALIZED_LENGTH else word
 
 
 def fuzzy_tolerance(length: int) -> int:
-    """Max edit distance allowed for a normalized word of this length. 0 = fuzzy skipped (too short, too risky)."""
-    if length <= 3:
-        return 0
-    if length <= 6:
+    """Max edit distance allowed for a normalized word of this length.
+    0 = only an exact match after normalization counts (too short, typo tolerance is too risky)."""
+    if length >= FUZZY_TWO_EDITS_MIN_LENGTH:
+        return 2
+    if length >= FUZZY_ONE_EDIT_MIN_LENGTH:
         return 1
-    return 2
+    return 0
 
 
 def fuzzy_match(token: str, normalized_triggers: list[str]) -> bool:
