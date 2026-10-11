@@ -169,7 +169,7 @@ class ProxyClient(discord.Client):
     def __init__(self):
         super().__init__(
             intents=intents,
-            activity=discord.Activity(type=discord.ActivityType.watching, name="/grimevasion info || ThorgrimCorp."),
+            activity=discord.Activity(type=discord.ActivityType.watching, name="/grimevasion info"),
             status=discord.Status.online,
         )
         self.tree = app_commands.CommandTree(self)
