@@ -846,7 +846,7 @@ async def on_message(msg: discord.Message):
             avatar_url=msg.author.display_avatar.url,
             files=files,
             thread=thread,
-            allowed_mentions=discord.AllowedMentions.none(),
+            allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True),
             suppress_embeds=not can_embed,
             wait=True,  # needed to get the sent message back (its id is stored below)
         )
@@ -862,7 +862,7 @@ async def on_message(msg: discord.Message):
                 avatar_url=msg.author.display_avatar.url,
                 files=files,
                 thread=thread,
-                allowed_mentions=discord.AllowedMentions.none(),
+                allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True),
                 suppress_embeds=not can_embed,
                 wait=True,
             )
