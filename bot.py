@@ -30,7 +30,8 @@ FUZZY_ONE_EDIT_MIN_LENGTH = 6   # from this length: 1 edit tolerated
 FUZZY_TWO_EDITS_MIN_LENGTH = 9  # from this length: 2 edits tolerated
 FUZZY_MIN_NORMALIZED_LENGTH = 2  # collapsing repeated letters never shrinks a word below this length
 
-LINK_PATTERN = re.compile(r"(https?://|www\.)\S+", re.IGNORECASE)
+# Stops at "|" so a spoilered link "||https://...||" keeps its closing bars when replaced by <URL>
+LINK_PATTERN = re.compile(r"(https?://|www\.)[^\s|]+", re.IGNORECASE)
 TOKEN_PATTERN = re.compile(r"[a-z0-9@$!]+")  # word-like clusters, leetspeak chars included
 
 # Catches evasion by separator-stuffing: "m.o.t", "m-o-t", "m_o_t", "m o t".
@@ -210,6 +211,41 @@ def strip_reply_prefix(content: str) -> str:
     return "\n".join(lines[i:])
 
 
+def spoiler_left_open(text: str) -> bool:
+    """True if a || spoiler is still open at the end of text.
+    Ignores escaped pipes (\\||) and pipes inside `inline code`, which Discord doesn't treat as spoilers."""
+    i, is_open, n = 0, False, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":  # escaped character: skip it
+            i += 2
+            continue
+        if c == "`":  # inline code span: skip to its matching closing backticks
+            j = i
+            while j < n and text[j] == "`":
+                j += 1
+            end = text.find(text[i:j], j)
+            i = end + (j - i) if end != -1 else j
+            continue
+        if text.startswith("||", i):
+            is_open = not is_open
+            i += 2
+            continue
+        i += 1
+    return is_open
+
+
+def truncate_preview(text: str, limit: int) -> str:
+    """Truncate a reply preview without ever leaving a || spoiler open
+    (an unclosed spoiler would render its content in plain sight)."""
+    if len(text) > limit:
+        # rstrip avoids leaving a lone "|" (half of a "||") or a dangling "\" escape
+        text = text[:limit - 3].rstrip("|\\") + "..."
+    if spoiler_left_open(text):
+        text += "||"
+    return text
+
+
 async def get_webhook(channel: discord.abc.GuildChannel) -> discord.Webhook:
     if channel.id in webhooks:
         return webhooks[channel.id]
@@ -252,10 +288,12 @@ async def build_reply_prefix(msg: discord.Message) -> str:
 
     preview = raw_content.replace("\n", " ").strip()
     preview = LINK_PATTERN.sub("<URL>", preview)
-    if len(preview) > PREVIEW_LENGTH:
-        preview = preview[:PREVIEW_LENGTH - 3] + "..."
+    preview = truncate_preview(preview, PREVIEW_LENGTH)
     if not preview:
-        preview = "*[attachment/embed]*"
+        if any(a.is_spoiler() for a in replied.attachments):
+            preview = "*[spoiler attachment]*"
+        else:
+            preview = "*[attachment/embed]*"
 
     # "-# " renders as small subtext in Discord; <@id> renders as a clickable mention
     return f"-# ↱ Replying to {author_label}: {preview} • [Jump to message]({replied.jump_url})\n-# ───────────────────\n"
@@ -917,7 +955,8 @@ async def on_message(msg: discord.Message):
 
     reply_prefix = await build_reply_prefix(msg)
     content = reply_prefix + msg.content
-    files = [await a.to_file() for a in msg.attachments]
+    # to_file() defaults to spoiler=False and strips the SPOILER_ prefix: keep the original state
+    files = [await a.to_file(spoiler=a.is_spoiler()) for a in msg.attachments]
 
     sent = None
     try:
