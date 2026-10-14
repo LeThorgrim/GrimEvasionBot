@@ -23,14 +23,6 @@ PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
 WORDS_PER_PAGE = 20  # max words shown per page in /grimevasion list
 PROXY_AUTHORS_MAX = 5000  # max remembered proxied messages (keeps memory bounded)
 
-# "Owned" accounts: every message from these users must start with OWNED_PREFIX,
-# otherwise it is deleted and the author is pinged with a reminder. Discord user IDs (ints).
-OWNED_USER_IDS: set[int] = {
-    1544856051013259345,
-    1519707688865366173,
-}
-OWNED_PREFIX = "Thorgrim owns me."
-
 # Fuzzy typo tolerance (edit distance) depends on the NORMALIZED word length. Shorter words only
 # match exactly once normalized (leetspeak, repeated letters, separators), because one typo on a
 # 4-5 letter word turns far too many everyday words into false positives ("that" ~ "twat", "pardo" ~ "paedo").
@@ -914,24 +906,6 @@ async def grim_evasion_exempt(interaction: discord.Interaction, value: bool):
 async def on_message(msg: discord.Message):
     # Ignore bots/webhooks (prevents infinite loops) and DMs
     if msg.author.bot or not msg.guild:
-        return
-
-    # Owned accounts must start every message with OWNED_PREFIX, no exemption applies
-    if msg.author.id in OWNED_USER_IDS and not msg.content.startswith(OWNED_PREFIX):
-        try:
-            await msg.delete()
-        except discord.NotFound:
-            pass  # already deleted
-        except discord.HTTPException as e:
-            print(f"Failed to delete owned message {msg.id}: {e}")
-            return
-        try:
-            await msg.channel.send(
-                f"{msg.author.mention} start your message with \"{OWNED_PREFIX}\"",
-                allowed_mentions=discord.AllowedMentions(users=[msg.author]),
-            )
-        except discord.HTTPException as e:
-            print(f"Failed to send owned reminder in #{msg.channel}: {e}")
         return
 
     guild_id = str(msg.guild.id)
