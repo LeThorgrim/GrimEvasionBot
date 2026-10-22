@@ -902,6 +902,24 @@ async def grim_evasion_exempt(interaction: discord.Interaction, value: bool):
     await interaction.response.send_message(f"{headline}\n{status}", ephemeral=True)
 
 
+def allowed_mentions_for(msg: discord.Message) -> discord.AllowedMentions:
+    """Build an AllowedMentions mirroring what the author could actually have pinged:
+      - user mentions: only the users the author mentioned in their OWN text (our reply-prefix
+        <@id> isn't in msg.mentions, so a reply still shows the label without pinging);
+      - @everyone/@here: only with the Mention Everyone permission in this channel;
+      - role mentions: all mentioned roles if they have Mention Everyone, otherwise only the
+        mentioned roles that are themselves mentionable — exactly Discord's own rule."""
+    perms = msg.channel.permissions_for(msg.author)
+    can_mention_everyone = perms.mention_everyone
+    roles = msg.role_mentions if can_mention_everyone else [r for r in msg.role_mentions if r.mentionable]
+    return discord.AllowedMentions(
+        everyone=can_mention_everyone,
+        users=msg.mentions,
+        roles=roles,
+        replied_user=False,
+    )
+
+
 @client.event
 async def on_message(msg: discord.Message):
     # Ignore bots/webhooks (prevents infinite loops) and DMs
@@ -941,6 +959,10 @@ async def on_message(msg: discord.Message):
     # Computed on the ORIGINAL channel (thread included) before we swap to the parent below.
     can_embed = msg.channel.permissions_for(msg.author).embed_links
 
+    # Mirror the author's real mention rights, so the repost pings exactly what their own
+    # message would have. Computed on the ORIGINAL channel, before the thread->parent swap.
+    allowed_mentions = allowed_mentions_for(msg)
+
     channel = msg.channel
     thread = discord.utils.MISSING
     if isinstance(channel, discord.Thread):  # webhooks belong to the parent channel
@@ -966,7 +988,7 @@ async def on_message(msg: discord.Message):
             avatar_url=msg.author.display_avatar.url,
             files=files,
             thread=thread,
-            allowed_mentions=discord.AllowedMentions.none(),
+            allowed_mentions=allowed_mentions,
             suppress_embeds=not can_embed,
             wait=True,  # needed to get the sent message back (its id is stored below)
         )
@@ -982,7 +1004,7 @@ async def on_message(msg: discord.Message):
                 avatar_url=msg.author.display_avatar.url,
                 files=files,
                 thread=thread,
-                allowed_mentions=discord.AllowedMentions.none(),
+                allowed_mentions=allowed_mentions,
                 suppress_embeds=not can_embed,
                 wait=True,
             )
