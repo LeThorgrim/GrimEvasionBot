@@ -1,9 +1,12 @@
-"""SQLite-backed storage for GrimEvasion's per-guild trigger word lists, settings, exempt users
+"""SQLite-backed storage for GrimUtilities' per-guild trigger word lists, settings, exempt users
 and per-channel message limits."""
+
+import os
 
 import aiosqlite
 
-DB_FILE = "grimevasion.db"
+DB_FILE = "grimutilities.db"
+LEGACY_DB_FILE = "grimevasion.db"  # name used before the GrimEvasion -> GrimUtilities rename
 
 _connection: aiosqlite.Connection | None = None
 
@@ -28,6 +31,9 @@ _SETTING_COLUMNS = {
 async def init_db() -> None:
     """Open the database connection and create tables if needed. Call once at startup."""
     global _connection
+    if not os.path.exists(DB_FILE) and os.path.exists(LEGACY_DB_FILE):
+        os.rename(LEGACY_DB_FILE, DB_FILE)  # keep existing data after the rename
+        print(f"Renamed {LEGACY_DB_FILE} to {DB_FILE}")
     _connection = await aiosqlite.connect(DB_FILE)
     await _connection.execute(
         """

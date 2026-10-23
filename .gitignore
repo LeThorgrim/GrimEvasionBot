@@ -2,4 +2,5 @@
 .vscode
 words.json
 __pycache__/
+grimutilities.db
 grimevasion.db

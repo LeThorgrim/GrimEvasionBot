@@ -20,9 +20,9 @@ if not TOKEN:
 WORD_LISTS_DIR = "wordLists"  # folder containing default word list .json files
 DELETE_DELAY = 0.01  # seconds to wait before deleting the original message (local display for users is bugged when too low)
 PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
-WORDS_PER_PAGE = 20  # max words shown per page in /ge words and /ge presets
+WORDS_PER_PAGE = 20  # max words shown per page in /gu words and /gu presets
 PROXY_AUTHORS_MAX = 5000  # max remembered proxied messages (keeps memory bounded)
-MESSAGE_LIMIT_MAX = 500  # highest value accepted by /ge limit (each cleanup re-reads up to this many messages)
+MESSAGE_LIMIT_MAX = 500  # highest value accepted by /gu limit (each cleanup re-reads up to this many messages)
 LIMIT_CLEANUP_DELAY = 5.0  # seconds to wait after a new message before cleaning a limited channel (groups bursts)
 
 # Fuzzy typo tolerance (edit distance) depends on the NORMALIZED word length. Shorter words only
@@ -46,7 +46,7 @@ SEPARATOR_CHAIN_PATTERN = re.compile(
 )
 SEPARATOR_STRIP_PATTERN = re.compile(r"[ \-_.]+")
 SETTINGS_PARAMETERS = ["doLinksTrigger", "doMediasTrigger", "doFuzzyDetection", "allowExemptList"]  # DB column names
-# Short names shown in /ge config -> DB column names
+# Short names shown in /gu config -> DB column names
 SETTINGS_ALIASES = {
     "links": "doLinksTrigger",
     "media": "doMediasTrigger",
@@ -186,7 +186,7 @@ class ProxyClient(discord.Client):
     def __init__(self):
         super().__init__(
             intents=intents,
-            activity=discord.Activity(type=discord.ActivityType.watching, name="/ge help"),
+            activity=discord.Activity(type=discord.ActivityType.watching, name="/gu help"),
             status=discord.Status.online,
         )
         self.tree = app_commands.CommandTree(self)
@@ -334,13 +334,13 @@ async def on_ready():
 
 
 # ---------------------------------------------------------------------------
-# /ge command group
+# /gu command group
 # ---------------------------------------------------------------------------
-# Every command is a direct subcommand: "/ge <action>", e.g. "/ge add", "/ge presets".
-# Discord can't run a group by itself, so "/ge help" is the entry point.
+# Every command is a direct subcommand: "/gu <action>", e.g. "/gu add", "/gu presets".
+# Discord can't run a group by itself, so "/gu help" is the entry point.
 
-ge_group = app_commands.Group(name="ge", description="GrimEvasion proxy bot commands", guild_only=True)
-client.tree.add_command(ge_group)
+gu_group = app_commands.Group(name="gu", description="GrimUtilities bot commands", guild_only=True)
+client.tree.add_command(gu_group)
 
 
 @client.tree.error
@@ -376,45 +376,46 @@ def format_words(words: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# /ge help
+# /gu help
 # ---------------------------------------------------------------------------
 
-@ge_group.command(name="help", description="Show what GrimEvasion does and list its commands")
-async def ge_help(interaction: discord.Interaction):
+@gu_group.command(name="help", description="Show what GrimUtilities does and list its commands")
+async def gu_help(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="GrimEvasion",
+        title="GrimUtilities",
         description=(
-            "GrimEvasion watches messages for trigger words. When one matches, "
+            "GrimUtilities watches messages for trigger words. When one matches, "
             "the original message is deleted and reposted through a webhook "
             "using your name and avatar, so it looks like it came from you "
-            "while still being tracked by the bot."
+            "while still being tracked by the bot. It can also limit how many "
+            "messages a channel keeps."
         ),
         color=discord.Color.blurple(),
     )
     embed.add_field(
         name="Trigger words",
         value=(
-            "`/ge words [page]` — show this server's trigger words\n"
-            "`/ge add words` — add one or more words (comma-separated) 🔒\n"
-            "`/ge remove words` — remove one or more words (comma-separated) 🔒\n"
-            "`/ge clear` — remove ALL words, after a confirmation 🔒"
+            "`/gu words [page]` — show this server's trigger words\n"
+            "`/gu add words` — add one or more words (comma-separated) 🔒\n"
+            "`/gu remove words` — remove one or more words (comma-separated) 🔒\n"
+            "`/gu clear` — remove ALL words, after a confirmation 🔒"
         ),
         inline=False,
     )
     embed.add_field(
         name="Presets (default word lists)",
         value=(
-            "`/ge presets` — list the available presets\n"
-            "`/ge presets name [page]` — preview a preset\n"
-            "`/ge import name` — add a preset's words to this server 🔒"
+            "`/gu presets` — list the available presets\n"
+            "`/gu presets name [page]` — preview a preset\n"
+            "`/gu import name` — add a preset's words to this server 🔒"
         ),
         inline=False,
     )
     embed.add_field(
         name="Settings",
         value=(
-            "`/ge config` — show this server's settings\n"
-            "`/ge config setting value` — change one 🔒\n"
+            "`/gu config` — show this server's settings\n"
+            "`/gu config setting value` — change one 🔒\n"
             "Settings: " + ", ".join(f"`{alias}` ({SETTINGS_DESCRIPTIONS[alias]})" for alias in SETTINGS_ALIASES)
         ),
         inline=False,
@@ -422,9 +423,9 @@ async def ge_help(interaction: discord.Interaction):
     embed.add_field(
         name="Channels",
         value=(
-            "`/ge limit [channel]` — show this channel's message limit\n"
-            f"`/ge limit count [enabled] [channel]` — keep only the `count` most recent messages (max {MESSAGE_LIMIT_MAX}) 🔒\n"
-            "`/ge limit enabled` — turn the limit on/off, keeping its count 🔒\n"
+            "`/gu limit [channel]` — show this channel's message limit\n"
+            f"`/gu limit count [enabled] [channel]` — keep only the `count` most recent messages (max {MESSAGE_LIMIT_MAX}) 🔒\n"
+            "`/gu limit enabled` — turn the limit on/off, keeping its count 🔒\n"
             "Pinned messages are never deleted and don't count."
         ),
         inline=False,
@@ -432,7 +433,7 @@ async def ge_help(interaction: discord.Interaction):
     embed.add_field(
         name="Personal",
         value=(
-            "`/ge exempt [value]` — toggle yourself on/off the exempt list (or force it with `value`). "
+            "`/gu exempt [value]` — toggle yourself on/off the exempt list (or force it with `value`). "
             "Only applies while the `exempt` setting is enabled."
         ),
         inline=False,
@@ -443,7 +444,7 @@ async def ge_help(interaction: discord.Interaction):
 
 
 # ---------------------------------------------------------------------------
-# /ge words
+# /gu words
 # ---------------------------------------------------------------------------
 
 def build_list_embed(guild_name: str, words: list[str], page: int, total_pages: int) -> discord.Embed:
@@ -451,7 +452,7 @@ def build_list_embed(guild_name: str, words: list[str], page: int, total_pages: 
     end = start + WORDS_PER_PAGE
     page_words = words[start:end]
 
-    description = format_words(page_words) if page_words else "*No trigger words yet. Add some with `/ge add`.*"
+    description = format_words(page_words) if page_words else "*No trigger words yet. Add some with `/gu add`.*"
 
     embed = discord.Embed(
         title=f"Trigger words — {guild_name}",
@@ -504,9 +505,9 @@ class WordListView(discord.ui.View):
             child.disabled = True
 
 
-@ge_group.command(name="words", description="Show this server's trigger words")
+@gu_group.command(name="words", description="Show this server's trigger words")
 @app_commands.describe(page="Page number to jump to (starts at 1)")
-async def ge_words(interaction: discord.Interaction, page: int = 1):
+async def gu_words(interaction: discord.Interaction, page: int = 1):
     guild_id = str(interaction.guild_id)
     words = await db.get_words(guild_id)
     total_pages = max(1, (len(words) + WORDS_PER_PAGE - 1) // WORDS_PER_PAGE)
@@ -519,13 +520,13 @@ async def ge_words(interaction: discord.Interaction, page: int = 1):
 
 
 # ---------------------------------------------------------------------------
-# /ge add
+# /gu add
 # ---------------------------------------------------------------------------
 
-@ge_group.command(name="add", description="Add one or more trigger words (comma-separated)")
+@gu_group.command(name="add", description="Add one or more trigger words (comma-separated)")
 @app_commands.describe(words="Word(s) to add, separated by commas: word1, word2")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def ge_add(interaction: discord.Interaction, words: str):
+async def gu_add(interaction: discord.Interaction, words: str):
     guild_id = str(interaction.guild_id)
     to_add = parse_words(words)
 
@@ -550,7 +551,7 @@ async def ge_add(interaction: discord.Interaction, words: str):
 
 
 # ---------------------------------------------------------------------------
-# /ge remove
+# /gu remove
 # ---------------------------------------------------------------------------
 
 async def guild_word_autocomplete(
@@ -577,11 +578,11 @@ async def guild_word_autocomplete(
     return choices
 
 
-@ge_group.command(name="remove", description="Remove one or more trigger words (comma-separated)")
+@gu_group.command(name="remove", description="Remove one or more trigger words (comma-separated)")
 @app_commands.describe(words="Word(s) to remove, separated by commas: word1, word2")
 @app_commands.autocomplete(words=guild_word_autocomplete)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def ge_remove(interaction: discord.Interaction, words: str):
+async def gu_remove(interaction: discord.Interaction, words: str):
     guild_id = str(interaction.guild_id)
     to_remove = parse_words(words)
 
@@ -605,7 +606,7 @@ async def ge_remove(interaction: discord.Interaction, words: str):
 
 
 # ---------------------------------------------------------------------------
-# /ge clear
+# /gu clear
 # ---------------------------------------------------------------------------
 
 class ClearConfirmView(discord.ui.View):
@@ -655,9 +656,9 @@ class ClearConfirmView(discord.ui.View):
             pass
 
 
-@ge_group.command(name="clear", description="Remove ALL trigger words from this server")
+@gu_group.command(name="clear", description="Remove ALL trigger words from this server")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def ge_clear(interaction: discord.Interaction):
+async def gu_clear(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     words = await db.get_words(guild_id)
 
@@ -675,7 +676,7 @@ async def ge_clear(interaction: discord.Interaction):
 
 
 # ---------------------------------------------------------------------------
-# /ge presets
+# /gu presets
 # ---------------------------------------------------------------------------
 
 async def default_list_autocomplete(
@@ -699,7 +700,7 @@ def build_default_list_embed(list_name: str, words: list[str], page: int, total_
         color=discord.Color.blurple(),
     )
     embed.set_footer(
-        text=f"Page {page + 1}/{total_pages} • {len(words)} word(s) • Use /ge import name:{list_name} to import it."
+        text=f"Page {page + 1}/{total_pages} • {len(words)} word(s) • Use /gu import name:{list_name} to import it."
     )
     return embed
 
@@ -751,13 +752,13 @@ class DefaultListView(discord.ui.View):
             child.disabled = True
 
 
-@ge_group.command(name="presets", description="List the available presets, or preview one by name")
+@gu_group.command(name="presets", description="List the available presets, or preview one by name")
 @app_commands.describe(
     name="Preset to preview (leave empty to list all presets)",
     page="Page number to jump to when previewing (starts at 1)",
 )
 @app_commands.autocomplete(name=default_list_autocomplete)
-async def ge_presets(interaction: discord.Interaction, name: str | None = None, page: int = 1):
+async def gu_presets(interaction: discord.Interaction, name: str | None = None, page: int = 1):
     if name is None:
         names = list_default_word_lists()
         if not names:
@@ -771,7 +772,7 @@ async def ge_presets(interaction: discord.Interaction, name: str | None = None, 
             description="\n".join(f"• `{n}`" for n in names),
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text="Use /ge presets name:<preset> to preview one, or /ge import name:<preset> to import it.")
+        embed.set_footer(text="Use /gu presets name:<preset> to preview one, or /gu import name:<preset> to import it.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
@@ -792,14 +793,14 @@ async def ge_presets(interaction: discord.Interaction, name: str | None = None, 
 
 
 # ---------------------------------------------------------------------------
-# /ge import
+# /gu import
 # ---------------------------------------------------------------------------
 
-@ge_group.command(name="import", description="Add a preset's words to this server's trigger list")
+@gu_group.command(name="import", description="Add a preset's words to this server's trigger list")
 @app_commands.describe(name="Preset to import")
 @app_commands.autocomplete(name=default_list_autocomplete)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def ge_import(interaction: discord.Interaction, name: str):
+async def gu_import(interaction: discord.Interaction, name: str):
     words_to_add = load_default_word_list(name)
 
     if words_to_add is None:
@@ -820,10 +821,10 @@ async def ge_import(interaction: discord.Interaction, name: str):
 
 
 # ---------------------------------------------------------------------------
-# /ge config
+# /gu config
 # ---------------------------------------------------------------------------
 
-@ge_group.command(name="config", description="Show this server's settings, or change one")
+@gu_group.command(name="config", description="Show this server's settings, or change one")
 @app_commands.describe(
     setting="Setting to change (leave empty to show all settings)",
     value="Enable (True) or disable (False)",
@@ -831,7 +832,7 @@ async def ge_import(interaction: discord.Interaction, name: str):
 @app_commands.choices(
     setting=[app_commands.Choice(name=f"{alias} — {SETTINGS_DESCRIPTIONS[alias]}", value=alias) for alias in SETTINGS_ALIASES]
 )
-async def ge_config(
+async def gu_config(
     interaction: discord.Interaction,
     setting: app_commands.Choice[str] | None = None,
     value: bool | None = None,
@@ -861,7 +862,7 @@ async def ge_config(
             value="\n".join(limited) if limited else "*No channel has a message limit.*",
             inline=False,
         )
-        embed.set_footer(text="Use /ge config setting:<name> value:<true/false> to change one.")
+        embed.set_footer(text="Use /gu config setting:<name> value:<true/false> to change one.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
@@ -888,12 +889,12 @@ async def ge_config(
 
 
 # ---------------------------------------------------------------------------
-# /ge exempt
+# /gu exempt
 # ---------------------------------------------------------------------------
 
-@ge_group.command(name="exempt", description="Toggle yourself on/off this server's exempt list")
+@gu_group.command(name="exempt", description="Toggle yourself on/off this server's exempt list")
 @app_commands.describe(value="Optional: True to be exempt, False to stop being exempt (empty = toggle)")
-async def ge_exempt(interaction: discord.Interaction, value: bool | None = None):
+async def gu_exempt(interaction: discord.Interaction, value: bool | None = None):
     # Always usable by anyone: the reply states whether the exempt list is actually applied.
     guild_id = str(interaction.guild_id)
     user_id = str(interaction.user.id)
@@ -1073,13 +1074,13 @@ class LimitConfirmView(discord.ui.View):
             pass
 
 
-@ge_group.command(name="limit", description="Keep only the N most recent messages in a channel")
+@gu_group.command(name="limit", description="Keep only the N most recent messages in a channel")
 @app_commands.describe(
     count=f"How many recent messages to keep (1-{MESSAGE_LIMIT_MAX}). Setting it turns the limit on.",
     enabled="Turn the limit on or off (keeps the stored count)",
     channel="Channel to configure (defaults to this one)",
 )
-async def ge_limit(
+async def gu_limit(
     interaction: discord.Interaction,
     count: app_commands.Range[int, 1, MESSAGE_LIMIT_MAX] | None = None,
     enabled: bool | None = None,
