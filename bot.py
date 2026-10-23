@@ -20,7 +20,7 @@ if not TOKEN:
 WORD_LISTS_DIR = "wordLists"  # folder containing default word list .json files
 DELETE_DELAY = 0.01  # seconds to wait before deleting the original message (local display for users is bugged when too low)
 PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
-WORDS_PER_PAGE = 20  # max words shown per page in /grimevasion list
+WORDS_PER_PAGE = 20  # max words shown per page in /ge words and /ge presets
 PROXY_AUTHORS_MAX = 5000  # max remembered proxied messages (keeps memory bounded)
 
 # Fuzzy typo tolerance (edit distance) depends on the NORMALIZED word length. Shorter words only
@@ -43,7 +43,20 @@ SEPARATOR_CHAIN_PATTERN = re.compile(
     rf"{_CHAIN_PIECE}(?:[ \-_.]+{_CHAIN_PIECE}){{1,}}", re.IGNORECASE
 )
 SEPARATOR_STRIP_PATTERN = re.compile(r"[ \-_.]+")
-SETTINGS_PARAMETERS = ["doLinksTrigger", "doMediasTrigger", "doFuzzyDetection", "allowExemptList"]  # valid /grimevasion configure values
+SETTINGS_PARAMETERS = ["doLinksTrigger", "doMediasTrigger", "doFuzzyDetection", "allowExemptList"]  # DB column names
+# Short names shown in /ge config -> DB column names
+SETTINGS_ALIASES = {
+    "links": "doLinksTrigger",
+    "media": "doMediasTrigger",
+    "fuzzy": "doFuzzyDetection",
+    "exempt": "allowExemptList",
+}
+SETTINGS_DESCRIPTIONS = {
+    "links": "trigger on messages containing links",
+    "media": "trigger on messages with attachments",
+    "fuzzy": "catch typos, leetspeak and spaced-out words",
+    "exempt": "apply the exempt list",
+}
 
 # Leetspeak -> letter substitutions applied before fuzzy comparison
 LEETSPEAK_MAP = str.maketrans({
@@ -170,7 +183,7 @@ class ProxyClient(discord.Client):
     def __init__(self):
         super().__init__(
             intents=intents,
-            activity=discord.Activity(type=discord.ActivityType.watching, name="/grimevasion info"),
+            activity=discord.Activity(type=discord.ActivityType.watching, name="/ge help"),
             status=discord.Status.online,
         )
         self.tree = app_commands.CommandTree(self)
@@ -311,25 +324,53 @@ async def on_ready():
 
 
 # ---------------------------------------------------------------------------
-# /grimevasion command group
+# /ge command group
 # ---------------------------------------------------------------------------
-# Top-level subcommands appear as "/grimevasion <subcommand>", e.g. "/grimevasion list"
-# "word" and "lists" are subgroups: "/grimevasion word add", "/grimevasion lists show"
+# Every command is a direct subcommand: "/ge <action>", e.g. "/ge add", "/ge presets".
+# Discord can't run a group by itself, so "/ge help" is the entry point.
 
-grimevasion_group = app_commands.Group(name="grimevasion", description="GrimEvasion proxy bot commands")
-client.tree.add_command(grimevasion_group)
+ge_group = app_commands.Group(name="ge", description="GrimEvasion proxy bot commands", guild_only=True)
+client.tree.add_command(ge_group)
 
-word_group = app_commands.Group(name="word", description="Manage this server's trigger words", parent=grimevasion_group)
-lists_group = app_commands.Group(name="lists", description="Browse and import default word lists", parent=grimevasion_group)
-list_group = app_commands.Group(name="list", description="View or clear this server's trigger words", parent=grimevasion_group)
+
+@client.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        text = "You need the Manage Server permission to use this."
+    else:
+        print(f"Command error: {error}")
+        text = "Something went wrong."
+    if interaction.response.is_done():
+        await interaction.followup.send(text, ephemeral=True)
+    else:
+        await interaction.response.send_message(text, ephemeral=True)
+
+
+def has_manage_guild(interaction: discord.Interaction) -> bool:
+    perms = getattr(interaction.user, "guild_permissions", None)
+    return bool(perms and perms.manage_guild)
+
+
+def parse_words(raw: str) -> list[str]:
+    """Split a comma-separated input into unique, lowercased, non-empty words (order kept)."""
+    seen: dict[str, None] = {}
+    for part in raw.split(","):
+        word = part.strip().lower()
+        if word:
+            seen[word] = None
+    return list(seen)
+
+
+def format_words(words: list[str]) -> str:
+    return ", ".join(f"`{w}`" for w in words)
 
 
 # ---------------------------------------------------------------------------
-# /grimevasion info
+# /ge help
 # ---------------------------------------------------------------------------
 
-@grimevasion_group.command(name="info", description="Show info about GrimEvasion and its commands")
-async def grim_evasion_info(interaction: discord.Interaction):
+@ge_group.command(name="help", description="Show what GrimEvasion does and list its commands")
+async def ge_help(interaction: discord.Interaction):
     embed = discord.Embed(
         title="GrimEvasion",
         description=(
@@ -341,70 +382,48 @@ async def grim_evasion_info(interaction: discord.Interaction):
         color=discord.Color.blurple(),
     )
     embed.add_field(
-        name="/grimevasion info",
-        value="Shows this help message.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/grimevasion word add `word`",
-        value="Adds a word to this server's trigger list. Requires **Manage Server**.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/grimevasion word remove `word`",
-        value="Removes a word from this server's trigger list. Requires **Manage Server**.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/grimevasion list show `page`",
-        value="Lists the trigger words configured for this server, with pagination.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/grimevasion list clear",
-        value="Removes ALL trigger words from this server, after a confirmation. Requires **Manage Server**.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/grimevasion lists list",
-        value="Lists the default word lists available to import.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/grimevasion lists show `name`",
-        value="Previews the content of a specific default word list.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/grimevasion lists add `name`",
-        value="Imports a default word list into this server's trigger list. Requires **Manage Server**.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/grimevasion configure `parameter` `value`",
-        value="Enables or disables a server setting (doLinksTrigger, doMediasTrigger, doFuzzyDetection, allowExemptList). Requires **Manage Server**.",
-        inline=False,
-    )
-    embed.add_field(
-        name="/grimevasion exempt `value`",
+        name="Trigger words",
         value=(
-            "Adds yourself to (`true`) or removes yourself from (`false`) this server's exempt list. "
-            "Exempt members are ignored by the proxy, but only while `allowExemptList` is enabled."
+            "`/ge words [page]` — show this server's trigger words\n"
+            "`/ge add words` — add one or more words (comma-separated) 🔒\n"
+            "`/ge remove words` — remove one or more words (comma-separated) 🔒\n"
+            "`/ge clear` — remove ALL words, after a confirmation 🔒"
         ),
         inline=False,
     )
     embed.add_field(
-        name="/grimevasion parameters",
-        value="Shows this server's current settings.",
+        name="Presets (default word lists)",
+        value=(
+            "`/ge presets` — list the available presets\n"
+            "`/ge presets name [page]` — preview a preset\n"
+            "`/ge import name` — add a preset's words to this server 🔒"
+        ),
         inline=False,
     )
-    embed.set_footer(text="Messages replying to another message keep a small preview and link.")
+    embed.add_field(
+        name="Settings",
+        value=(
+            "`/ge config` — show this server's settings\n"
+            "`/ge config setting value` — change one 🔒\n"
+            "Settings: " + ", ".join(f"`{alias}` ({SETTINGS_DESCRIPTIONS[alias]})" for alias in SETTINGS_ALIASES)
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Personal",
+        value=(
+            "`/ge exempt [value]` — toggle yourself on/off the exempt list (or force it with `value`). "
+            "Only applies while the `exempt` setting is enabled."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="🔒 = requires Manage Server • Replies to a message keep a small preview and link.")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
-# /grimevasion list
+# /ge words
 # ---------------------------------------------------------------------------
 
 def build_list_embed(guild_name: str, words: list[str], page: int, total_pages: int) -> discord.Embed:
@@ -412,7 +431,7 @@ def build_list_embed(guild_name: str, words: list[str], page: int, total_pages: 
     end = start + WORDS_PER_PAGE
     page_words = words[start:end]
 
-    description = ", ".join(f"`{w}`" for w in page_words) if page_words else "*No trigger words yet.*"
+    description = format_words(page_words) if page_words else "*No trigger words yet. Add some with `/ge add`.*"
 
     embed = discord.Embed(
         title=f"Trigger words — {guild_name}",
@@ -465,9 +484,9 @@ class WordListView(discord.ui.View):
             child.disabled = True
 
 
-@list_group.command(name="show", description="Show this server's trigger words")
+@ge_group.command(name="words", description="Show this server's trigger words")
 @app_commands.describe(page="Page number to jump to (starts at 1)")
-async def grim_evasion_list(interaction: discord.Interaction, page: int = 1):
+async def ge_words(interaction: discord.Interaction, page: int = 1):
     guild_id = str(interaction.guild_id)
     words = await db.get_words(guild_id)
     total_pages = max(1, (len(words) + WORDS_PER_PAGE - 1) // WORDS_PER_PAGE)
@@ -480,7 +499,93 @@ async def grim_evasion_list(interaction: discord.Interaction, page: int = 1):
 
 
 # ---------------------------------------------------------------------------
-# /grimevasion list clear
+# /ge add
+# ---------------------------------------------------------------------------
+
+@ge_group.command(name="add", description="Add one or more trigger words (comma-separated)")
+@app_commands.describe(words="Word(s) to add, separated by commas: word1, word2")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def ge_add(interaction: discord.Interaction, words: str):
+    guild_id = str(interaction.guild_id)
+    to_add = parse_words(words)
+
+    if not to_add:
+        await interaction.response.send_message("Please give at least one word.", ephemeral=True)
+        return
+
+    existing = set(await db.get_words(guild_id))
+    new_words = [w for w in to_add if w not in existing]
+    already = [w for w in to_add if w in existing]
+
+    if new_words:
+        await db.add_words(guild_id, new_words)
+        await refresh_pattern(guild_id)
+
+    lines = []
+    if new_words:
+        lines.append(f"✅ Added {format_words(new_words)}.")
+    if already:
+        lines.append(f"Already in the list: {format_words(already)}.")
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# /ge remove
+# ---------------------------------------------------------------------------
+
+async def guild_word_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    # Completes the LAST comma-separated piece, keeping what was typed before it:
+    # typing "foo, ba" suggests "foo, bar", "foo, baz"...
+    head, sep, last = current.rpartition(",")
+    prefix = f"{head}, " if sep else ""
+    already_typed = set(parse_words(head))
+    needle = last.strip().lower()
+
+    words = await db.get_words(str(interaction.guild_id))
+    choices = []
+    for w in words:
+        if w in already_typed or needle not in w:
+            continue
+        value = prefix + w
+        if len(value) > 100:  # Discord limit for choice names/values
+            continue
+        choices.append(app_commands.Choice(name=value, value=value))
+        if len(choices) == 25:
+            break
+    return choices
+
+
+@ge_group.command(name="remove", description="Remove one or more trigger words (comma-separated)")
+@app_commands.describe(words="Word(s) to remove, separated by commas: word1, word2")
+@app_commands.autocomplete(words=guild_word_autocomplete)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def ge_remove(interaction: discord.Interaction, words: str):
+    guild_id = str(interaction.guild_id)
+    to_remove = parse_words(words)
+
+    if not to_remove:
+        await interaction.response.send_message("Please give at least one word.", ephemeral=True)
+        return
+
+    removed, missing = [], []
+    for w in to_remove:
+        (removed if await db.remove_word(guild_id, w) else missing).append(w)
+
+    if removed:
+        await refresh_pattern(guild_id)
+
+    lines = []
+    if removed:
+        lines.append(f"🗑️ Removed {format_words(removed)}.")
+    if missing:
+        lines.append(f"Not in the list: {format_words(missing)}.")
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# /ge clear
 # ---------------------------------------------------------------------------
 
 class ClearConfirmView(discord.ui.View):
@@ -530,9 +635,9 @@ class ClearConfirmView(discord.ui.View):
             pass
 
 
-@list_group.command(name="clear", description="Remove ALL trigger words from this server")
+@ge_group.command(name="clear", description="Remove ALL trigger words from this server")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def grim_evasion_list_clear(interaction: discord.Interaction):
+async def ge_clear(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     words = await db.get_words(guild_id)
 
@@ -549,88 +654,9 @@ async def grim_evasion_list_clear(interaction: discord.Interaction):
     )
 
 
-@grim_evasion_list_clear.error
-async def grim_evasion_list_clear_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("You need the Manage Server permission to use this.", ephemeral=True)
-    else:
-        print(f"Command error: {error}")
-        await interaction.response.send_message("Something went wrong.", ephemeral=True)
-
-
 # ---------------------------------------------------------------------------
-# /grimevasion word add
+# /ge presets
 # ---------------------------------------------------------------------------
-
-@word_group.command(name="add", description="Add a word to this server's proxy trigger list")
-@app_commands.describe(word="The word to add")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def grim_evasion_word_add(interaction: discord.Interaction, word: str):
-    guild_id = str(interaction.guild_id)
-    word = word.strip().lower()
-
-    if not word:
-        await interaction.response.send_message("Word cannot be empty.", ephemeral=True)
-        return
-
-    added = await db.add_word(guild_id, word)
-    if not added:
-        await interaction.response.send_message(f"`{word}` is already in the list.", ephemeral=True)
-        return
-
-    await refresh_pattern(guild_id)
-
-    await interaction.response.send_message(f"Added `{word}` to the proxy trigger list.", ephemeral=True)
-
-
-@grim_evasion_word_add.error
-async def grim_evasion_word_add_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("You need the Manage Server permission to use this.", ephemeral=True)
-    else:
-        print(f"Command error: {error}")
-        await interaction.response.send_message("Something went wrong.", ephemeral=True)
-
-
-# ---------------------------------------------------------------------------
-# /grimevasion word remove
-# ---------------------------------------------------------------------------
-
-async def guild_word_autocomplete(
-    interaction: discord.Interaction, current: str
-) -> list[app_commands.Choice[str]]:
-    guild_id = str(interaction.guild_id)
-    words = await db.get_words(guild_id)
-    filtered = [w for w in words if current.lower() in w.lower()]
-    return [app_commands.Choice(name=w, value=w) for w in filtered[:25]]
-
-
-@word_group.command(name="remove", description="Remove a word from this server's proxy trigger list")
-@app_commands.describe(word="The word to remove")
-@app_commands.autocomplete(word=guild_word_autocomplete)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def grim_evasion_word_remove(interaction: discord.Interaction, word: str):
-    guild_id = str(interaction.guild_id)
-    word = word.strip().lower()
-
-    removed = await db.remove_word(guild_id, word)
-    if not removed:
-        await interaction.response.send_message(f"`{word}` is not in the list.", ephemeral=True)
-        return
-
-    await refresh_pattern(guild_id)
-
-    await interaction.response.send_message(f"Removed `{word}` from the proxy trigger list.", ephemeral=True)
-
-
-@grim_evasion_word_remove.error
-async def grim_evasion_word_remove_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("You need the Manage Server permission to use this.", ephemeral=True)
-    else:
-        print(f"Command error: {error}")
-        await interaction.response.send_message("Something went wrong.", ephemeral=True)
-
 
 async def default_list_autocomplete(
     interaction: discord.Interaction, current: str
@@ -640,48 +666,20 @@ async def default_list_autocomplete(
     return [app_commands.Choice(name=n, value=n) for n in filtered[:25]]
 
 
-# ---------------------------------------------------------------------------
-# /grimevasion lists list
-# ---------------------------------------------------------------------------
-
-@lists_group.command(name="list", description="List the default word lists available to import")
-async def grim_evasion_lists_list(interaction: discord.Interaction):
-    names = list_default_word_lists()
-
-    if not names:
-        await interaction.response.send_message(
-            f"No default word lists found in the `{WORD_LISTS_DIR}` folder.", ephemeral=True
-        )
-        return
-
-    embed = discord.Embed(
-        title="Available default word lists",
-        description="\n".join(f"• `{name}`" for name in names),
-        color=discord.Color.blurple(),
-    )
-    embed.set_footer(text="Use /grimevasion lists show name:<list name> to preview its content, or lists add to import it.")
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-# ---------------------------------------------------------------------------
-# /grimevasion lists show
-# ---------------------------------------------------------------------------
-
 def build_default_list_embed(list_name: str, words: list[str], page: int, total_pages: int) -> discord.Embed:
     start = page * WORDS_PER_PAGE
     end = start + WORDS_PER_PAGE
     page_words = words[start:end]
 
-    description = ", ".join(f"`{w}`" for w in page_words) if page_words else "*This list is empty.*"
+    description = format_words(page_words) if page_words else "*This preset is empty.*"
 
     embed = discord.Embed(
-        title=f"Default list — {list_name}",
+        title=f"Preset — {list_name}",
         description=description,
         color=discord.Color.blurple(),
     )
     embed.set_footer(
-        text=f"Page {page + 1}/{total_pages} • {len(words)} word(s) • Use /grimevasion lists add name:{list_name} to import it."
+        text=f"Page {page + 1}/{total_pages} • {len(words)} word(s) • Use /ge import name:{list_name} to import it."
     )
     return embed
 
@@ -733,15 +731,34 @@ class DefaultListView(discord.ui.View):
             child.disabled = True
 
 
-@lists_group.command(name="show", description="Show the content of a specific default word list")
-@app_commands.describe(name="Name of the default list to preview (without .json)", page="Page number to jump to (starts at 1)")
+@ge_group.command(name="presets", description="List the available presets, or preview one by name")
+@app_commands.describe(
+    name="Preset to preview (leave empty to list all presets)",
+    page="Page number to jump to when previewing (starts at 1)",
+)
 @app_commands.autocomplete(name=default_list_autocomplete)
-async def grim_evasion_lists_show(interaction: discord.Interaction, name: str, page: int = 1):
-    words = load_default_word_list(name)
+async def ge_presets(interaction: discord.Interaction, name: str | None = None, page: int = 1):
+    if name is None:
+        names = list_default_word_lists()
+        if not names:
+            await interaction.response.send_message(
+                f"No presets found in the `{WORD_LISTS_DIR}` folder.", ephemeral=True
+            )
+            return
 
+        embed = discord.Embed(
+            title="Available presets",
+            description="\n".join(f"• `{n}`" for n in names),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Use /ge presets name:<preset> to preview one, or /ge import name:<preset> to import it.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    words = load_default_word_list(name)
     if words is None:
         await interaction.response.send_message(
-            f"No valid default list named `{name}` found in `{WORD_LISTS_DIR}/`.", ephemeral=True
+            f"No valid preset named `{name}` found in `{WORD_LISTS_DIR}/`.", ephemeral=True
         )
         return
 
@@ -755,19 +772,19 @@ async def grim_evasion_lists_show(interaction: discord.Interaction, name: str, p
 
 
 # ---------------------------------------------------------------------------
-# /grimevasion lists add
+# /ge import
 # ---------------------------------------------------------------------------
 
-@lists_group.command(name="add", description="Import a default word list into this server")
-@app_commands.describe(name="Name of the default list to import (without .json)")
+@ge_group.command(name="import", description="Add a preset's words to this server's trigger list")
+@app_commands.describe(name="Preset to import")
 @app_commands.autocomplete(name=default_list_autocomplete)
 @app_commands.checks.has_permissions(manage_guild=True)
-async def grim_evasion_lists_add(interaction: discord.Interaction, name: str):
+async def ge_import(interaction: discord.Interaction, name: str):
     words_to_add = load_default_word_list(name)
 
     if words_to_add is None:
         await interaction.response.send_message(
-            f"No valid default list named `{name}` found in `{WORD_LISTS_DIR}/`.", ephemeral=True
+            f"No valid preset named `{name}` found in `{WORD_LISTS_DIR}/`.", ephemeral=True
         )
         return
 
@@ -782,90 +799,77 @@ async def grim_evasion_lists_add(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(message, ephemeral=True)
 
 
-@grim_evasion_lists_add.error
-async def grim_evasion_lists_add_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("You need the Manage Server permission to use this.", ephemeral=True)
-    else:
-        print(f"Command error: {error}")
-        await interaction.response.send_message("Something went wrong.", ephemeral=True)
-
-
 # ---------------------------------------------------------------------------
-# /grimevasion configure
+# /ge config
 # ---------------------------------------------------------------------------
 
-async def settings_parameter_autocomplete(
-    interaction: discord.Interaction, current: str
-) -> list[app_commands.Choice[str]]:
-    filtered = [p for p in SETTINGS_PARAMETERS if current.lower() in p.lower()]
-    return [app_commands.Choice(name=p, value=p) for p in filtered]
+@ge_group.command(name="config", description="Show this server's settings, or change one")
+@app_commands.describe(
+    setting="Setting to change (leave empty to show all settings)",
+    value="Enable (True) or disable (False)",
+)
+@app_commands.choices(
+    setting=[app_commands.Choice(name=f"{alias} — {SETTINGS_DESCRIPTIONS[alias]}", value=alias) for alias in SETTINGS_ALIASES]
+)
+async def ge_config(
+    interaction: discord.Interaction,
+    setting: app_commands.Choice[str] | None = None,
+    value: bool | None = None,
+):
+    guild_id = str(interaction.guild_id)
 
+    # Show mode: anyone can look at the settings.
+    if setting is None:
+        if value is not None:
+            await interaction.response.send_message(
+                "Pick a `setting` to change along with `value`.", ephemeral=True
+            )
+            return
 
-@grimevasion_group.command(name="configure", description="Enable or disable an automatic trigger setting for this server")
-@app_commands.describe(parameter="The setting to change", value="Enable (True) or disable (False)")
-@app_commands.autocomplete(parameter=settings_parameter_autocomplete)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def grim_evasion_configure(interaction: discord.Interaction, parameter: str, value: bool):
-    if parameter not in SETTINGS_PARAMETERS:
+        settings = await db.get_settings(guild_id)
+        embed = discord.Embed(title=f"Settings — {interaction.guild.name}", color=discord.Color.blurple())
+        for alias, column in SETTINGS_ALIASES.items():
+            state = "✅ Enabled" if settings[column] else "❌ Disabled"
+            embed.add_field(name=alias, value=f"{state}\n*{SETTINGS_DESCRIPTIONS[alias]}*", inline=True)
+        embed.set_footer(text="Use /ge config setting:<name> value:<true/false> to change one.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    alias = setting.value
+    column = SETTINGS_ALIASES[alias]
+
+    if value is None:
+        settings = await db.get_settings(guild_id)
+        state = "enabled" if settings[column] else "disabled"
         await interaction.response.send_message(
-            f"Unknown parameter `{parameter}`. Valid options: {', '.join(SETTINGS_PARAMETERS)}",
-            ephemeral=True,
+            f"`{alias}` is currently **{state}**. Add `value` to change it.", ephemeral=True
         )
         return
 
-    guild_id = str(interaction.guild_id)
-    await db.set_setting(guild_id, parameter, value)
+    # Change mode: requires Manage Server.
+    if not has_manage_guild(interaction):
+        raise app_commands.MissingPermissions(["manage_guild"])
+
+    await db.set_setting(guild_id, column, value)
     await refresh_settings(guild_id)
 
     state = "enabled" if value else "disabled"
-    await interaction.response.send_message(f"`{parameter}` is now **{state}** for this server.", ephemeral=True)
-
-
-@grim_evasion_configure.error
-async def grim_evasion_configure_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("You need the Manage Server permission to use this.", ephemeral=True)
-    else:
-        print(f"Command error: {error}")
-        await interaction.response.send_message("Something went wrong.", ephemeral=True)
+    await interaction.response.send_message(f"`{alias}` is now **{state}** for this server.", ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
-# /grimevasion parameters
+# /ge exempt
 # ---------------------------------------------------------------------------
 
-@grimevasion_group.command(name="parameters", description="Show this server's GrimEvasion settings")
-async def grim_evasion_parameters(interaction: discord.Interaction):
-    guild_id = str(interaction.guild_id)
-    settings = await db.get_settings(guild_id)
-
-    embed = discord.Embed(
-        title=f"Settings — {interaction.guild.name}",
-        color=discord.Color.blurple(),
-    )
-    for param in SETTINGS_PARAMETERS:
-        state = "✅ Enabled" if settings[param] else "❌ Disabled"
-        embed.add_field(name=param, value=state, inline=True)
-    embed.set_footer(text="Use /grimevasion configure parameter:<name> value:<true/false> to change these.")
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-# ---------------------------------------------------------------------------
-# /grimevasion exempt
-# ---------------------------------------------------------------------------
-
-@grimevasion_group.command(name="exempt", description="Add or remove yourself from this server's exempt list")
-@app_commands.describe(value="True to add yourself to the exempt list, False to remove yourself")
-async def grim_evasion_exempt(interaction: discord.Interaction, value: bool):
+@ge_group.command(name="exempt", description="Toggle yourself on/off this server's exempt list")
+@app_commands.describe(value="Optional: True to be exempt, False to stop being exempt (empty = toggle)")
+async def ge_exempt(interaction: discord.Interaction, value: bool | None = None):
     # Always usable by anyone: the reply states whether the exempt list is actually applied.
-    if interaction.guild_id is None:
-        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-        return
-
     guild_id = str(interaction.guild_id)
     user_id = str(interaction.user.id)
+
+    if value is None:
+        value = user_id not in set(await db.get_exempt_users(guild_id))
 
     if value:
         changed = await db.add_exempt_user(guild_id, user_id)
@@ -885,17 +889,17 @@ async def grim_evasion_exempt(interaction: discord.Interaction, value: bool):
     enabled = get_cached_settings(guild_id)["allowExemptList"]
 
     if enabled and value:
-        status = "✅ `allowExemptList` is **enabled** on this server: your messages will **not** be proxied, even when they match a trigger."
+        status = "✅ The `exempt` setting is **enabled** on this server: your messages will **not** be proxied, even when they match a trigger."
     elif enabled:
-        status = "✅ `allowExemptList` is **enabled** on this server: your messages **will** be proxied when they match a trigger."
+        status = "✅ The `exempt` setting is **enabled** on this server: your messages **will** be proxied when they match a trigger."
     elif value:
         status = (
-            "⚠️ `allowExemptList` is currently **disabled** on this server: your messages **will still** be proxied "
+            "⚠️ The `exempt` setting is currently **disabled** on this server: your messages **will still** be proxied "
             "when they match a trigger. You'll be exempt as soon as someone with **Manage Server** enables it."
         )
     else:
         status = (
-            "ℹ️ `allowExemptList` is **disabled** on this server: the exempt list isn't applied, "
+            "ℹ️ The `exempt` setting is **disabled** on this server: the exempt list isn't applied, "
             "so your messages are proxied when they match a trigger either way."
         )
 
