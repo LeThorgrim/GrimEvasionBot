@@ -1,4 +1,5 @@
-"""SQLite-backed storage for GrimEvasion's per-guild trigger word lists, settings and exempt users."""
+"""SQLite-backed storage for GrimEvasion's per-guild trigger word lists, settings, exempt users
+and per-channel message limits."""
 
 import aiosqlite
 
@@ -54,6 +55,16 @@ async def init_db() -> None:
             guild_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             PRIMARY KEY (guild_id, user_id)
+        )
+        """
+    )
+    await _connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS channel_limits (
+            channel_id TEXT PRIMARY KEY,
+            guild_id TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            max_messages INTEGER NOT NULL
         )
         """
     )
@@ -214,6 +225,39 @@ async def remove_exempt_user(guild_id: str, user_id: str) -> bool:
     """Remove a user from the exempt list. Returns False if they weren't on it."""
     cursor = await _connection.execute(
         "DELETE FROM guild_exempt_users WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
+    )
+    await _connection.commit()
+    return cursor.rowcount > 0
+
+# ---------------------------------------------------------------------------
+# Channel message limits
+# ---------------------------------------------------------------------------
+
+async def get_all_channel_limits() -> list[tuple[str, str, bool, int]]:
+    """Return every stored channel limit as (channel_id, guild_id, enabled, max_messages)."""
+    async with _connection.execute(
+        "SELECT channel_id, guild_id, enabled, max_messages FROM channel_limits"
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return [(row[0], row[1], bool(row[2]), row[3]) for row in rows]
+
+
+async def set_channel_limit(guild_id: str, channel_id: str, enabled: bool, max_messages: int) -> None:
+    """Create or update a channel's message limit."""
+    await _connection.execute(
+        """
+        INSERT INTO channel_limits (channel_id, guild_id, enabled, max_messages) VALUES (?, ?, ?, ?)
+        ON CONFLICT(channel_id) DO UPDATE SET enabled = excluded.enabled, max_messages = excluded.max_messages
+        """,
+        (channel_id, guild_id, int(enabled), max_messages),
+    )
+    await _connection.commit()
+
+
+async def delete_channel_limit(channel_id: str) -> bool:
+    """Forget a channel's message limit (e.g. the channel was deleted). Returns False if none was stored."""
+    cursor = await _connection.execute(
+        "DELETE FROM channel_limits WHERE channel_id = ?", (channel_id,)
     )
     await _connection.commit()
     return cursor.rowcount > 0

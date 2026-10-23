@@ -22,6 +22,8 @@ DELETE_DELAY = 0.01  # seconds to wait before deleting the original message (loc
 PREVIEW_LENGTH = 80  # max characters shown from the replied-to message
 WORDS_PER_PAGE = 20  # max words shown per page in /ge words and /ge presets
 PROXY_AUTHORS_MAX = 5000  # max remembered proxied messages (keeps memory bounded)
+MESSAGE_LIMIT_MAX = 500  # highest value accepted by /ge limit (each cleanup re-reads up to this many messages)
+LIMIT_CLEANUP_DELAY = 5.0  # seconds to wait after a new message before cleaning a limited channel (groups bursts)
 
 # Fuzzy typo tolerance (edit distance) depends on the NORMALIZED word length. Shorter words only
 # match exactly once normalized (leetspeak, repeated letters, separators), because one typo on a
@@ -68,6 +70,7 @@ guild_patterns: dict[str, re.Pattern] = {}       # cache: guild_id -> compiled r
 guild_normalized_words: dict[str, list[str]] = {}  # cache: guild_id -> normalized trigger words (for fuzzy match)
 guild_settings: dict[str, dict] = {}              # cache: guild_id -> settings dict
 guild_exempt: dict[str, set[str]] = {}            # cache: guild_id -> user ids (as str) on the exempt list
+channel_limits: dict[str, dict] = {}              # cache: channel_id -> {"guild_id", "enabled", "max"}
 
 
 def build_pattern(words: list[str]) -> re.Pattern | None:
@@ -321,6 +324,13 @@ async def on_ready():
         await refresh_settings(guild_id)
     for guild_id in await db.get_all_exempt_guild_ids():
         await refresh_exempt(guild_id)
+    for channel_id, guild_id, enabled, max_messages in await db.get_all_channel_limits():
+        channel_limits[channel_id] = {"guild_id": guild_id, "enabled": enabled, "max": max_messages}
+        if enabled:
+            # Messages may have piled up while the bot was offline
+            channel = client.get_channel(int(channel_id))
+            if channel is not None:
+                schedule_limit_cleanup(channel)
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +416,16 @@ async def ge_help(interaction: discord.Interaction):
             "`/ge config` — show this server's settings\n"
             "`/ge config setting value` — change one 🔒\n"
             "Settings: " + ", ".join(f"`{alias}` ({SETTINGS_DESCRIPTIONS[alias]})" for alias in SETTINGS_ALIASES)
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Channels",
+        value=(
+            "`/ge limit [channel]` — show this channel's message limit\n"
+            f"`/ge limit count [enabled] [channel]` — keep only the `count` most recent messages (max {MESSAGE_LIMIT_MAX}) 🔒\n"
+            "`/ge limit enabled` — turn the limit on/off, keeping its count 🔒\n"
+            "Pinned messages are never deleted and don't count."
         ),
         inline=False,
     )
@@ -831,6 +851,16 @@ async def ge_config(
         for alias, column in SETTINGS_ALIASES.items():
             state = "✅ Enabled" if settings[column] else "❌ Disabled"
             embed.add_field(name=alias, value=f"{state}\n*{SETTINGS_DESCRIPTIONS[alias]}*", inline=True)
+        limited = [
+            f"<#{cid}> — keeps {lim['max']}"
+            for cid, lim in channel_limits.items()
+            if lim["guild_id"] == guild_id and lim["enabled"]
+        ]
+        embed.add_field(
+            name="Message limits",
+            value="\n".join(limited) if limited else "*No channel has a message limit.*",
+            inline=False,
+        )
         embed.set_footer(text="Use /ge config setting:<name> value:<true/false> to change one.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
@@ -906,6 +936,218 @@ async def ge_exempt(interaction: discord.Interaction, value: bool | None = None)
     await interaction.response.send_message(f"{headline}\n{status}", ephemeral=True)
 
 
+# ---------------------------------------------------------------------------
+# Channel message limits
+# ---------------------------------------------------------------------------
+# A limited channel only keeps its N most recent messages: everything older is deleted.
+# Pinned messages are never deleted and don't count toward N.
+
+limit_cleanup_pending: set[int] = set()            # channel ids with a cleanup already scheduled
+limit_cleanup_locks: dict[int, asyncio.Lock] = {}  # channel id -> lock (one cleanup at a time per channel)
+
+
+async def enforce_message_limit(channel: discord.abc.Messageable, keep: int) -> int:
+    """Delete every non-pinned message older than the `keep` most recent ones. Returns how many were deleted."""
+    boundary = None
+    kept = 0
+    async for message in channel.history(limit=None):  # newest first
+        if message.pinned:
+            continue
+        kept += 1
+        if kept == keep:
+            boundary = message
+            break
+
+    if boundary is None:
+        return 0  # not over the limit
+
+    # purge() bulk-deletes messages younger than 14 days and falls back to one-by-one
+    # deletion for older ones (Discord refuses to bulk-delete those).
+    deleted = await channel.purge(
+        limit=None,
+        before=boundary,
+        check=lambda m: not m.pinned,
+        reason=f"Channel message limit ({keep})",
+    )
+    return len(deleted)
+
+
+def schedule_limit_cleanup(channel: discord.abc.Messageable) -> None:
+    """Run a cleanup of this channel a few seconds from now. Calls made in the meantime are merged."""
+    if channel.id in limit_cleanup_pending:
+        return
+    limit_cleanup_pending.add(channel.id)
+    asyncio.create_task(_run_limit_cleanup(channel))
+
+
+async def _run_limit_cleanup(channel: discord.abc.Messageable) -> None:
+    await asyncio.sleep(LIMIT_CLEANUP_DELAY)
+    # Released BEFORE cleaning: a message arriving during the cleanup schedules a new pass.
+    limit_cleanup_pending.discard(channel.id)
+
+    lock = limit_cleanup_locks.setdefault(channel.id, asyncio.Lock())
+    async with lock:
+        limit = channel_limits.get(str(channel.id))
+        if not limit or not limit["enabled"]:
+            return  # disabled while we were waiting
+        try:
+            deleted = await enforce_message_limit(channel, limit["max"])
+        except discord.Forbidden:
+            print(f"Missing permission to clean #{channel} (needs Read Message History and Manage Messages)")
+            return
+        except discord.HTTPException as e:
+            # e.g. a message in the batch was deleted meanwhile (the proxy does that): try again later
+            print(f"Message limit cleanup failed in #{channel}: {e}")
+            schedule_limit_cleanup(channel)
+            return
+        if deleted:
+            print(f"Message limit: deleted {deleted} message(s) in #{channel}")
+
+
+async def set_channel_limit_and_cache(guild_id: str, channel_id: str, enabled: bool, max_messages: int) -> None:
+    await db.set_channel_limit(guild_id, channel_id, enabled, max_messages)
+    channel_limits[channel_id] = {"guild_id": guild_id, "enabled": enabled, "max": max_messages}
+
+
+@client.event
+async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
+    if channel_limits.pop(str(channel.id), None) is not None:
+        await db.delete_channel_limit(str(channel.id))
+
+
+@client.event
+async def on_raw_thread_delete(payload: discord.RawThreadDeleteEvent):
+    if channel_limits.pop(str(payload.thread_id), None) is not None:
+        await db.delete_channel_limit(str(payload.thread_id))
+
+
+class LimitConfirmView(discord.ui.View):
+    """Asks for confirmation before turning on (or lowering) a limit, since deleted messages are gone for good."""
+
+    def __init__(self, channel, count: int, requester_id: int, interaction: discord.Interaction):
+        super().__init__(timeout=30)
+        self.channel = channel
+        self.count = count
+        self.requester_id = requester_id
+        self.interaction = interaction  # original interaction, used to edit the prompt on timeout
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can use these buttons.", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="Yes, enable it", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await set_channel_limit_and_cache(str(interaction.guild_id), str(self.channel.id), True, self.count)
+        schedule_limit_cleanup(self.channel)
+        self._disable_all()
+        self.stop()
+        await interaction.response.edit_message(
+            content=(
+                f"✅ {self.channel.mention} now keeps only its **{self.count}** most recent message(s). "
+                "Older messages are being deleted (this can take a while for messages older than 14 days)."
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(label="No, cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._disable_all()
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled. Nothing was changed.", view=self)
+
+    async def on_timeout(self):
+        self._disable_all()
+        try:
+            await self.interaction.edit_original_response(
+                content="⌛ Confirmation timed out. Nothing was changed.", view=self
+            )
+        except discord.HTTPException:
+            pass
+
+
+@ge_group.command(name="limit", description="Keep only the N most recent messages in a channel")
+@app_commands.describe(
+    count=f"How many recent messages to keep (1-{MESSAGE_LIMIT_MAX}). Setting it turns the limit on.",
+    enabled="Turn the limit on or off (keeps the stored count)",
+    channel="Channel to configure (defaults to this one)",
+)
+async def ge_limit(
+    interaction: discord.Interaction,
+    count: app_commands.Range[int, 1, MESSAGE_LIMIT_MAX] | None = None,
+    enabled: bool | None = None,
+    channel: discord.TextChannel | discord.VoiceChannel | discord.Thread | None = None,
+):
+    channel = channel or interaction.channel
+    guild_id = str(interaction.guild_id)
+    channel_id = str(channel.id)
+    current = channel_limits.get(channel_id)
+
+    # Show mode: anyone can look.
+    if count is None and enabled is None:
+        if current is None:
+            text = f"{channel.mention} has no message limit."
+        else:
+            state = "**enabled**" if current["enabled"] else "**disabled**"
+            text = f"{channel.mention} keeps its **{current['max']}** most recent message(s) — limit {state}."
+        await interaction.response.send_message(text, ephemeral=True)
+        return
+
+    # Change mode: requires Manage Server.
+    if not has_manage_guild(interaction):
+        raise app_commands.MissingPermissions(["manage_guild"])
+
+    new_count = count if count is not None else (current["max"] if current else None)
+    new_enabled = enabled if enabled is not None else True  # giving a count implies turning it on
+
+    if new_count is None:
+        await interaction.response.send_message(
+            f"{channel.mention} has no stored count yet: give one with `count`.", ephemeral=True
+        )
+        return
+
+    if not new_enabled:
+        await set_channel_limit_and_cache(guild_id, channel_id, False, new_count)
+        await interaction.response.send_message(
+            f"Message limit **disabled** for {channel.mention} (count {new_count} kept for later).", ephemeral=True
+        )
+        return
+
+    # Turning it on: the bot must be able to read the history and delete messages there.
+    perms = channel.permissions_for(interaction.guild.me)
+    if not (perms.read_message_history and perms.manage_messages):
+        await interaction.response.send_message(
+            f"I need **Read Message History** and **Manage Messages** in {channel.mention} to enforce a limit.",
+            ephemeral=True,
+        )
+        return
+
+    was_enabled = bool(current and current["enabled"])
+    if was_enabled and new_count >= current["max"]:
+        # Raising (or keeping) an active limit deletes nothing: no confirmation needed.
+        await set_channel_limit_and_cache(guild_id, channel_id, True, new_count)
+        await interaction.response.send_message(
+            f"✅ {channel.mention} now keeps its **{new_count}** most recent message(s).", ephemeral=True
+        )
+        return
+
+    view = LimitConfirmView(channel, new_count, interaction.user.id, interaction)
+    await interaction.response.send_message(
+        f"⚠️ {channel.mention} will only keep its **{new_count}** most recent message(s): every older message "
+        "(except pinned ones) will be **deleted now**, and again each time new messages come in. "
+        "This cannot be undone. Continue?",
+        view=view,
+        ephemeral=True,
+    )
+
+
 def allowed_mentions_for(msg: discord.Message) -> discord.AllowedMentions:
     """Build an AllowedMentions mirroring what the author could actually have pinged:
       - user mentions: only the users the author mentioned in their OWN text (our reply-prefix
@@ -926,8 +1168,16 @@ def allowed_mentions_for(msg: discord.Message) -> discord.AllowedMentions:
 
 @client.event
 async def on_message(msg: discord.Message):
-    # Ignore bots/webhooks (prevents infinite loops) and DMs
-    if msg.author.bot or not msg.guild:
+    if not msg.guild:
+        return
+
+    # Message limits count EVERY message (bots and webhooks included), so this runs before the bot filter
+    limit = channel_limits.get(str(msg.channel.id))
+    if limit and limit["enabled"]:
+        schedule_limit_cleanup(msg.channel)
+
+    # Ignore bots/webhooks (prevents infinite loops)
+    if msg.author.bot:
         return
 
     guild_id = str(msg.guild.id)

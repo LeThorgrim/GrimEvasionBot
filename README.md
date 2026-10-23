@@ -10,6 +10,7 @@ A Discord bot that proxies messages containing trigger words: it deletes the ori
 - Per-guild toggles to also trigger on messages containing links (`links`) or attachments (`media`), independent of the word list
 - Per-guild fuzzy detection (`fuzzy`), using `rapidfuzz`, that catches typos, leetspeak (`d0t`), doubled/repeated letters (`doooot`), and separator-stuffed spelling (`d.o.t`, `d-o-t`, `d o t`) even when the exact word isn't typed
 - Per-guild exempt list (`exempt` setting): when a server enables it, members can opt themselves out of the proxy with `/ge exempt`
+- Per-channel message limit: a channel can be set to keep only its N most recent messages (up to 500), older ones being deleted automatically
 - Reposts via webhook, preserving attachments
 - Works in threads
 - If the proxied message is a reply, shows a small clickable preview linking to the original
@@ -21,6 +22,7 @@ A Discord bot that proxies messages containing trigger words: it deletes the ori
 3. Invite the bot with the `bot` and `applications.commands` scopes, granting:
    - Manage Webhooks
    - Manage Messages
+   - Read Message History
    - View Channels
    - Send Messages
    - Attach Files
@@ -80,6 +82,13 @@ python bot.py
 | `fuzzy` | `doFuzzyDetection` | catch typos, leetspeak and spaced-out words |
 | `exempt` | `allowExemptList` | apply the exempt list |
 
+**Channels**
+- `/ge limit channel:<channel>(optional)` — show a channel's message limit (defaults to the current channel).
+- `/ge limit count:<1-500> enabled:<true/false>(optional) channel:<channel>(optional)` 🔒 — keep only the `count` most recent messages in the channel; everything older is deleted. Giving a `count` turns the limit on unless `enabled:false` is passed.
+- `/ge limit enabled:<true/false>` 🔒 — turn the limit on or off without changing its stored count.
+
+Turning a limit on, or lowering an active one, asks for a Yes/No confirmation first (30 seconds, only the person who ran the command can answer), since deleted messages can't be recovered. Raising an active limit applies directly. Channels with an active limit are also listed in `/ge config`.
+
 **Personal**
 - `/ge exempt value:<true/false>(optional)` — without `value`, toggles you on/off this server's exempt list; with it, forces the state. Anyone can use it, and the reply tells you whether the exempt list is currently applied on this server (see the `exempt` setting below).
 
@@ -93,3 +102,6 @@ python bot.py
 - The `exempt` setting controls whether the exempt list is applied. When it is **enabled**, messages from exempt members are ignored by the proxy entirely (not deleted, not reposted), even if they match a trigger. When it is **disabled**, `/ge exempt` still works and the list is still saved, but it has no effect (the command's reply says so); it starts applying as soon as the setting is enabled.
 - If the bot replies to a message that gets deleted afterwards, the bot answer is not updated.
 - When someone replies to a message the bot proxied, the preview mentions the real author rather than the webhook. This mapping is kept in memory only (last 5000 proxied messages), so after a restart the preview shows the name without a mention.
+- Message limits: pinned messages are never deleted and don't count toward the limit. Bot and webhook messages (including proxied reposts) do count. The cleanup runs a few seconds after new messages arrive (bursts are grouped into a single pass, tunable with `LIMIT_CLEANUP_DELAY`), and once at startup for every limited channel, to catch messages posted while the bot was offline. The maximum (`MESSAGE_LIMIT_MAX`, 500) keeps each cleanup cheap: the bot re-reads up to that many messages every time.
+- Discord only allows bulk deletion of messages younger than 14 days. Older messages are deleted one by one, which is rate-limited: the first cleanup of a channel with a long history can take a while. The bot needs **Read Message History** and **Manage Messages** in a channel to enforce a limit there; `/ge limit` checks this before enabling one.
+- When a limited channel or thread is deleted, its limit is removed from the database.
